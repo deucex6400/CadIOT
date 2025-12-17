@@ -1,0 +1,26 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet-isolated",
+    "AppConfig__ConnectionString": "<optional-connection-string>",
+    "AppConfig__Endpoint": "<optional-endpoint-uri>",
+    "IoTHub__HostName": "<your-hub-name>.azure-devices.net",
+    "IoTHub__ConnectionString": "<service SAS connection string>",
+    "Dispatch__SharedMailbox": "Alert@bgvolfd.org",
+    "Dispatch__WebhookUrl": "https://<your-function-host>/api/Notifications",
+    "Dispatch__LifecycleWebhookUrl": "https://<your-function-host>/api/Notifications",
+    "Dispatch__UseRichNotifications": "true",
+    "Dispatch__EncryptionCertBase64": "<base64-public-cert>",
+    "Dispatch__EncryptionCertId": "bgvfd-cert",
+    "Dispatch:Routes:DISPATCH-1": "Relay-1",
+    "Dispatch:Routes:DISPATCH-2": "Relay-2",
+    "Dispatch:Routes:DISPATCH-3": "Relay-3",
+    "Storage__AccountUri": "https://<storage>.table.core.windows.net",
+    "Storage__ConnectionString": "UseDevelopmentStorage=true",
+    "Storage__TableName": "DispatchAudit",
+    "Features__DispatchEnabled": "true",
+    "Features__UseDirectMethod": "true",
+    "Sentinels__AppConfigReload": "1"
+  }
+}
