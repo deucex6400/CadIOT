@@ -72,7 +72,18 @@ namespace cad_dispatch.Functions
                 }
 
                 match = await graph.Subscriptions.PostAsync(sub);
-                _log.LogInformation("Created Graph subscription {Id} exp {Exp}", match.Id, match.ExpirationDateTime);
+                //_log.LogInformation("Created Graph subscription {Id} exp {Exp}", match.Id, match.ExpirationDateTime);
+
+                if (match is null)
+                {
+                    _log.LogWarning("Created Graph subscription is null");
+                    return; // or handle as needed
+                }
+
+                _log.LogInformation("Created Graph subscription {Id} exp {Exp}",
+                    match.Id ?? "(null)",
+                    match.ExpirationDateTime?.ToString("O") ?? "(null)");
+
                 await _audit.WriteAsync("subscription_created", e => { e["subscriptionId"] = match.Id; e["expires"] = match.ExpirationDateTime; });
                 return;
             }

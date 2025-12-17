@@ -6,7 +6,9 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Graph;
 using cad_dispatch.Services;
+using GraphClientFactory = cad_dispatch.Services.GraphClientFactory;
 
+// Fix: Replace ConfigureFunctionsWebApplication with ConfigureFunctionsWorkerDefaults
 var host = new HostBuilder()
     .ConfigureAppConfiguration((ctx, config) =>
     {
@@ -26,12 +28,12 @@ var host = new HostBuilder()
                        {
                            // Optional sentinel to trigger full refresh when its value changes
                            refresh.Register("Sentinels__AppConfigReload", refreshAll: true)
-                                  .SetCacheExpiration(TimeSpan.FromSeconds(30));
+                                  .SetRefreshInterval(TimeSpan.FromSeconds(30));
                        })
                        .UseFeatureFlags());
         }
     })
-    .ConfigureFunctionsWebApplication()
+    .ConfigureFunctionsWorkerDefaults() // Updated method to fix CS1061
     .ConfigureServices(services =>
     {
         services.AddSingleton<IoTHubService>();

@@ -1,1 +1,4 @@
 src/local.settings.json
+/src/.vs
+/src/bin
+/src/obj

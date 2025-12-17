@@ -148,7 +148,7 @@ namespace cad_dispatch.Functions
 
                             await graph.Users[userId].Messages[messageId].PatchAsync(new Message { IsRead = true });
                             var folders = await graph.Users[userId].MailFolders.GetAsync();
-                            var processedFolder = folders.Value.FirstOrDefault(f => f.DisplayName.Equals("Processed", StringComparison.OrdinalIgnoreCase));
+                            var processedFolder = folders?.Value?.FirstOrDefault(f => f.DisplayName != null && f.DisplayName.Equals("Processed", StringComparison.OrdinalIgnoreCase));
                             if (processedFolder != null)
                             {
                                 await graph.Users[userId].Messages[messageId].Move.PostAsync(
