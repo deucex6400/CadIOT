@@ -1,3 +1,5 @@
+
+using System.IO;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Azure.Functions.Worker;
@@ -31,11 +33,14 @@ namespace cad_dispatch.Functions
             _log = log;
         }
 
+        // Helper: prefer App Configuration colon keys, fall back to env var double-underscore
+        private string? Get(string colonKey, string underscoreKey) => _config[colonKey] ?? _config[underscoreKey];
+
         [Function("Notifications")]
         public async Task<HttpResponseData> Run(
             [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post")] HttpRequestData req)
         {
-            // Validation handshake
+            // Validation handshake (Graph webhook)
             var query = System.Web.HttpUtility.ParseQueryString(req.Url.Query);
             var validationToken = query.Get("validationToken");
             if (!string.IsNullOrEmpty(validationToken))
@@ -48,8 +53,9 @@ namespace cad_dispatch.Functions
                 return res;
             }
 
-            // Optional feature flag to disable dispatch
-            var dispatchEnabled = bool.TryParse(_config["Features__DispatchEnabled"], out var en) ? en : true;
+            // Feature flag from App Config (colon) with env-var fallback
+            var dispatchEnabledRaw = Get("Features:DispatchEnabled", "Features__DispatchEnabled");
+            var dispatchEnabled = bool.TryParse(dispatchEnabledRaw, out var en) ? en : true;
 
             var body = await new StreamReader(req.Body).ReadToEndAsync();
             if (string.IsNullOrWhiteSpace(body))
@@ -57,7 +63,7 @@ namespace cad_dispatch.Functions
                 _log.LogWarning("Empty notification body.");
                 var bad = req.CreateResponse(System.Net.HttpStatusCode.BadRequest);
                 await bad.WriteStringAsync("{\"error\":\"empty_body\"}");
-                await _audit.WriteAsync("webhook_empty", e => {});
+                await _audit.WriteAsync("webhook_empty", e => { });
                 return bad;
             }
 
@@ -88,12 +94,14 @@ namespace cad_dispatch.Functions
                     string? userId = null;
                     string? messageId = null;
 
+                    // Rich notifications case
                     if (n.TryGetProperty("resourceData", out var rd) && rd.ValueKind == JsonValueKind.Object)
                     {
                         messageId = rd.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
                         userId = rd.TryGetProperty("userId", out var userEl) ? userEl.GetString() : null;
                     }
 
+                    // Basic notifications case (parse 'resource')
                     if ((userId == null || messageId == null) && n.TryGetProperty("resource", out var resEl))
                     {
                         var resource = resEl.GetString();
@@ -102,6 +110,7 @@ namespace cad_dispatch.Functions
                             await _audit.WriteAsync("skip_non_message", e => { e["resource"] = resource; });
                             continue;
                         }
+
                         var m = Regex.Match(resource, @"^/users/([^/]+)/messages/([^/?]+)", RegexOptions.IgnoreCase);
                         if (m.Success)
                         {
@@ -117,7 +126,7 @@ namespace cad_dispatch.Functions
 
                     if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(messageId))
                     {
-                        await _audit.WriteAsync("missing_ids", e => {});
+                        await _audit.WriteAsync("missing_ids", e => { });
                         continue;
                     }
 
@@ -127,9 +136,10 @@ namespace cad_dispatch.Functions
                         {
                             r.QueryParameters.Select = new[] { "subject" };
                         });
-                        var subject = msg?.Subject ?? string.Empty;
 
+                        var subject = msg?.Subject ?? string.Empty;
                         var deviceId = ResolveDeviceIdFromConfig(subject);
+
                         if (!dispatchEnabled)
                         {
                             _log.LogWarning("Dispatch disabled via feature flag.");
@@ -140,25 +150,41 @@ namespace cad_dispatch.Functions
                         if (!string.IsNullOrEmpty(deviceId))
                         {
                             var result = await _iot.TriggerRelayAsync(deviceId, new { subject, reason = "CAD" });
-                            await _audit.WriteAsync("dispatch_triggered", e => {
-                                e["userId"] = userId; e["messageId"] = messageId;
-                                e["subject"] = subject; e["deviceId"] = deviceId;
-                                e["via"] = result.via; e["status"] = result.status;
+
+                            await _audit.WriteAsync("dispatch_triggered", e =>
+                            {
+                                e["userId"] = userId;
+                                e["messageId"] = messageId;
+                                e["subject"] = subject;
+                                e["deviceId"] = deviceId;
+                                e["via"] = result.via;
+                                e["status"] = result.status;
                             });
 
+                            // Mark read and optionally move to "Processed"
                             await graph.Users[userId].Messages[messageId].PatchAsync(new Message { IsRead = true });
+
                             var folders = await graph.Users[userId].MailFolders.GetAsync();
-                            var processedFolder = folders?.Value?.FirstOrDefault(f => f.DisplayName != null && f.DisplayName.Equals("Processed", StringComparison.OrdinalIgnoreCase));
+                            var processedFolder = folders?.Value?.FirstOrDefault(f =>
+                                f.DisplayName != null && f.DisplayName.Equals("Processed", StringComparison.OrdinalIgnoreCase));
+
                             if (processedFolder != null)
                             {
                                 await graph.Users[userId].Messages[messageId].Move.PostAsync(
                                     new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody
-                                    { DestinationId = processedFolder.Id });
-                                await _audit.WriteAsync("message_moved", e => { e["messageId"] = messageId; e["folderId"] = processedFolder.Id; });
+                                    {
+                                        DestinationId = processedFolder.Id
+                                    });
+
+                                await _audit.WriteAsync("message_moved", e =>
+                                {
+                                    e["messageId"] = messageId;
+                                    e["folderId"] = processedFolder.Id;
+                                });
                             }
                             else
                             {
-                                await _audit.WriteAsync("processed_folder_missing", e => {});
+                                await _audit.WriteAsync("processed_folder_missing", e => { });
                             }
                         }
                         else
@@ -168,7 +194,12 @@ namespace cad_dispatch.Functions
                     }
                     catch (Exception ex)
                     {
-                        await _audit.WriteAsync("dispatch_error", e => { e["userId"] = userId; e["messageId"] = messageId; e["error"] = ex.Message; });
+                        await _audit.WriteAsync("dispatch_error", e =>
+                        {
+                            e["userId"] = userId;
+                            e["messageId"] = messageId;
+                            e["error"] = ex.Message;
+                        });
                     }
                 }
             }
@@ -184,10 +215,12 @@ namespace cad_dispatch.Functions
             var routes = GetDispatchRoutes();
             foreach (var kvp in routes)
             {
-                if (!string.IsNullOrWhiteSpace(kvp.Key) && subject.IndexOf(kvp.Key, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (!string.IsNullOrWhiteSpace(kvp.Key) &&
+                    subject.IndexOf(kvp.Key, StringComparison.OrdinalIgnoreCase) >= 0)
                     return kvp.Value;
             }
-            // fallback
+
+            // Simple fallbacks
             if (subject.IndexOf("DISPATCH-1", StringComparison.OrdinalIgnoreCase) >= 0) return "Relay-1";
             if (subject.IndexOf("DISPATCH-2", StringComparison.OrdinalIgnoreCase) >= 0) return "Relay-2";
             if (subject.IndexOf("DISPATCH-3", StringComparison.OrdinalIgnoreCase) >= 0) return "Relay-3";
@@ -196,14 +229,31 @@ namespace cad_dispatch.Functions
 
         private IReadOnlyDictionary<string, string> GetDispatchRoutes()
         {
+            // Prefer App Config colon section
             var section = _config.GetSection("Dispatch:Routes");
             var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
             foreach (var child in section.GetChildren())
             {
-                var pattern = child.Key; var device = child.Value ?? string.Empty;
+                var pattern = child.Key;
+                var device = child.Value ?? string.Empty;
                 if (!string.IsNullOrWhiteSpace(pattern) && !string.IsNullOrWhiteSpace(device))
                     dict[pattern] = device;
             }
+
+            // If nothing in App Config, optionally fall back to env vars (flat keys)
+            // Example env keys: Dispatch:Routes:DISPATCH-1 (stored in App Config) OR Dispatch__Routes__DISPATCH-1 (Function App app settings)
+            if (dict.Count == 0)
+            {
+                // Try a few known route keys via direct reads as a minimal fallback
+                var r1 = Get("Dispatch:Routes:DISPATCH-1", "Dispatch__Routes__DISPATCH-1");
+                var r2 = Get("Dispatch:Routes:DISPATCH-2", "Dispatch__Routes__DISPATCH-2");
+                var r3 = Get("Dispatch:Routes:DISPATCH-3", "Dispatch__Routes__DISPATCH-3");
+                if (!string.IsNullOrWhiteSpace(r1)) dict["DISPATCH-1"] = r1!;
+                if (!string.IsNullOrWhiteSpace(r2)) dict["DISPATCH-2"] = r2!;
+                if (!string.IsNullOrWhiteSpace(r3)) dict["DISPATCH-3"] = r3!;
+            }
+
             return dict;
         }
     }

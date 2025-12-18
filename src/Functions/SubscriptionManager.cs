@@ -1,3 +1,4 @@
+
 using System;
 using System.Linq;
 using Microsoft.Azure.Functions.Worker;
@@ -23,26 +24,35 @@ namespace cad_dispatch.Functions
             _log = log;
         }
 
+        // Helper: prefer App Configuration colon keys, fall back to env var double-underscore
+        private string? Get(string colonKey, string underscoreKey) => _config[colonKey] ?? _config[underscoreKey];
+
         [Function("SubscriptionManager")]
         public async Task Run([TimerTrigger("0 */30 * * * *")] TimerInfo timerInfo)
         {
             var graph = _graphFactory.Client;
 
-            var mailbox       = _config["Dispatch__SharedMailbox"];
-            var webhookUrl    = _config["Dispatch__WebhookUrl"];
-            var lifecycleUrl  = _config["Dispatch__LifecycleWebhookUrl"]; // optional
-            var useRich       = bool.TryParse(_config["Dispatch__UseRichNotifications"], out var b) && b;
-            var encCertBase64 = _config["Dispatch__EncryptionCertBase64"];
-            var encCertId     = _config["Dispatch__EncryptionCertId"] ?? "bgvfd-cert";
+            // App Config keys (colon) with env-var fallback (double underscore)
+            var mailbox = Get("Dispatch:SharedMailbox", "Dispatch__SharedMailbox");
+            var webhookUrl = Get("Dispatch:WebhookUrl", "Dispatch__WebhookUrl");
+            var lifecycleUrl = Get("Dispatch:LifecycleWebhookUrl", "Dispatch__LifecycleWebhookUrl"); // optional
+            var useRichRaw = Get("Dispatch:UseRichNotifications", "Dispatch__UseRichNotifications");
+            var encCertBase64 = Get("Dispatch:EncryptionCertBase64", "Dispatch__EncryptionCertBase64");
+            var encCertId = Get("Dispatch:EncryptionCertId", "Dispatch__EncryptionCertId") ?? "bgvfd-cert";
+
+            var useRich = bool.TryParse(useRichRaw, out var b) && b;
 
             if (string.IsNullOrWhiteSpace(mailbox) || string.IsNullOrWhiteSpace(webhookUrl))
             {
                 _log.LogWarning("SubscriptionManager missing mailbox or webhookUrl.");
-                await _audit.WriteAsync("subscription_config_missing", e => {});
+                await _audit.WriteAsync("subscription_config_missing", e => { });
                 return;
             }
 
+            // Base resource (no select)
             var resourceBasic = $"/users/{mailbox}/mailFolders('inbox')/messages";
+
+            // Lifetime: richer notifications typically shorter
             var desiredLifetimeMinutes = useRich ? 1440 : 10080;
 
             var existingSubs = await graph.Subscriptions.GetAsync();
@@ -60,9 +70,11 @@ namespace cad_dispatch.Functions
                     ClientState = "bgvfd-alerts",
                     ExpirationDateTime = DateTimeOffset.UtcNow.AddMinutes(desiredLifetimeMinutes)
                 };
+
                 if (!string.IsNullOrEmpty(lifecycleUrl))
                     sub.LifecycleNotificationUrl = lifecycleUrl;
 
+                // Rich notifications: include resource data and certificate settings
                 if (useRich && !string.IsNullOrWhiteSpace(encCertBase64))
                 {
                     sub.IncludeResourceData = true;
@@ -72,29 +84,35 @@ namespace cad_dispatch.Functions
                 }
 
                 match = await graph.Subscriptions.PostAsync(sub);
-                //_log.LogInformation("Created Graph subscription {Id} exp {Exp}", match.Id, match.ExpirationDateTime);
 
                 if (match is null)
                 {
                     _log.LogWarning("Created Graph subscription is null");
-                    return; // or handle as needed
+                    return;
                 }
 
                 _log.LogInformation("Created Graph subscription {Id} exp {Exp}",
                     match.Id ?? "(null)",
                     match.ExpirationDateTime?.ToString("O") ?? "(null)");
 
-                await _audit.WriteAsync("subscription_created", e => { e["subscriptionId"] = match.Id; e["expires"] = match.ExpirationDateTime; });
+                await _audit.WriteAsync("subscription_created", e =>
+                {
+                    e["subscriptionId"] = match.Id;
+                    e["expires"] = match.ExpirationDateTime;
+                });
                 return;
             }
 
+            // Renew when close to expiration
             var threshold = TimeSpan.FromMinutes(useRich ? 30 : 120);
-            if (match.ExpirationDateTime.HasValue && match.ExpirationDateTime.Value - DateTimeOffset.UtcNow < threshold)
+            if (match.ExpirationDateTime.HasValue &&
+                match.ExpirationDateTime.Value - DateTimeOffset.UtcNow < threshold)
             {
                 var update = new Subscription
                 {
                     ExpirationDateTime = DateTimeOffset.UtcNow.AddMinutes(desiredLifetimeMinutes)
                 };
+
                 if (useRich && !string.IsNullOrWhiteSpace(encCertBase64))
                 {
                     update.IncludeResourceData = true;
@@ -102,13 +120,23 @@ namespace cad_dispatch.Functions
                     update.EncryptionCertificateId = encCertId;
                     update.Resource = $"/users/{mailbox}/mailFolders('inbox')/messages?$select=subject,from,receivedDateTime";
                 }
+
                 await graph.Subscriptions[match.Id].PatchAsync(update);
+
                 _log.LogInformation("Renewed Graph subscription {Id} new exp {Exp}", match.Id, update.ExpirationDateTime);
-                await _audit.WriteAsync("subscription_renewed", e => { e["subscriptionId"] = match.Id; e["expires"] = update.ExpirationDateTime; });
+                await _audit.WriteAsync("subscription_renewed", e =>
+                {
+                    e["subscriptionId"] = match.Id;
+                    e["expires"] = update.ExpirationDateTime;
+                });
             }
             else
             {
-                await _audit.WriteAsync("subscription_ok", e => { e["subscriptionId"] = match.Id; e["expires"] = match.ExpirationDateTime; });
+                await _audit.WriteAsync("subscription_ok", e =>
+                {
+                    e["subscriptionId"] = match.Id;
+                    e["expires"] = match.ExpirationDateTime;
+                });
             }
         }
 
