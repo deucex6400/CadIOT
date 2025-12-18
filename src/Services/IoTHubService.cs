@@ -1,4 +1,3 @@
-
 using System.Text;
 using System.Text.Json;
 using Azure.Identity;
@@ -11,14 +10,13 @@ namespace cad_dispatch.Services
 {
     /// <summary>
     /// Sends commands to ESP32 devices via IoT Hub.
-    /// Prefers AAD/MSI when IoTHub:HostName is set; otherwise uses IoTHub:ConnectionString.
+    /// Prefers SAS when a connection string is present; otherwise uses AAD/MSI with HostName.
     /// Works with either App Config (colon keys) or env vars (double-underscore).
     /// </summary>
     public class IoTHubService
     {
         private static ServiceClient? _cachedClient;
         private static readonly object _lock = new();
-
         private readonly IConfiguration _config;
         private readonly ILogger<IoTHubService>? _log;
 
@@ -37,48 +35,47 @@ namespace cad_dispatch.Services
 
         private async Task<ServiceClient> GetClientAsync()
         {
-            if (_cachedClient is not null)
-                return _cachedClient;
+            if (_cachedClient is not null) return _cachedClient;
 
-            lock (_lock)
+            var hostName = Get("HostName");       // e.g., <hub>.azure-devices.net
+            var connStr  = Get("ConnectionString"); // Hub service connection string
+
+            // Prefer SAS when available to simplify local development
+            if (!string.IsNullOrWhiteSpace(connStr))
             {
-                if (_cachedClient is null)
-                {
-                    var hostName = Get("HostName");           // e.g., bgvfd-iot-hub.azure-devices.net
-                    var connStr = Get("ConnectionString");   // Hub connection string (service policy)
-
-                    _log?.LogInformation("IoTHub auth path: {path}", string.IsNullOrWhiteSpace(hostName) ? "connectionString" : "AAD/MSI");
-
-
-
-                    if (!string.IsNullOrWhiteSpace(hostName))
-                    {
-                        // AAD/MSI path: requires IoT Hub RBAC (e.g., IoT Hub Data Contributor)
-                        // ServiceClient.Create(hostName, TokenCredential) is supported.
-                        _cachedClient = ServiceClient.Create(
-                            hostName,
-                            new DefaultAzureCredential()
-                        ); // Transport/Options can be provided if needed
-                    }
-                    else if (!string.IsNullOrWhiteSpace(connStr))
-                    {
-                        _cachedClient = ServiceClient.CreateFromConnectionString(connStr);
-                    }
-                    else
-                    {
-                        throw new InvalidOperationException(
-                            "IoTHub configuration missing. Supply IoTHub:HostName (for MSI) or IoTHub:ConnectionString.");
-                    }
-                }
+                _log?.LogInformation("IoTHub auth path: SAS");
+                _cachedClient = ServiceClient.CreateFromConnectionString(connStr);
+                await _cachedClient.OpenAsync();
+                return _cachedClient!;
             }
 
+            if (string.IsNullOrWhiteSpace(hostName))
+            {
+                throw new InvalidOperationException("IoTHub configuration missing. Set IoTHub:ConnectionString or IoTHub:HostName.");
+            }
 
-            //var hostName = Get("HostName");
-            //var connStr = Get("ConnectionString");
-            //_log?.LogInformation("IoTHub auth path: {path}", string.IsNullOrWhiteSpace(hostName) ? "connectionString" : "AAD/MSI");
-
-            await _cachedClient!.OpenAsync();
-            return _cachedClient!;
+            // AAD/MSI path. This requires IoT Hub RBAC (e.g., IoT Hub Data Contributor) on the principal used.
+            // The SDK supports TokenCredential with ServiceClient.Create(hostName, credential).
+            var cred = new DefaultAzureCredential();
+            _log?.LogInformation("IoTHub auth path: AAD/MSI (host={host})", hostName);
+            try
+            {
+                _cachedClient = ServiceClient.Create(hostName, cred);
+                await _cachedClient.OpenAsync();
+                return _cachedClient!;
+            }
+            catch (Microsoft.Azure.Amqp.AmqpException amqpEx) when (amqpEx.Message.Contains("Unauthorized"))
+            {
+                // If RBAC isn't configured yet, and a SAS string exists in env/appsettings later, try to fall back.
+                if (!string.IsNullOrWhiteSpace(connStr))
+                {
+                    _log?.LogWarning("AAD/MSI unauthorized. Falling back to SAS connection string.");
+                    _cachedClient = ServiceClient.CreateFromConnectionString(connStr);
+                    await _cachedClient.OpenAsync();
+                    return _cachedClient!;
+                }
+                throw; // rethrow if no SAS available
+            }
         }
 
         public async Task<(string via, int status)> TriggerRelayAsync(string deviceId, object payload)

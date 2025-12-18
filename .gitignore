@@ -3,5 +3,3 @@ src/local.settings.json
 /src/bin
 /src/obj
 esp32/CadIOT-v4/iot_configs.h
-src/local.settings.json
-src/local.settings.json
