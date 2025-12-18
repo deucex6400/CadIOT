@@ -5,67 +5,62 @@ using Azure;
 using Azure.Data.Tables;
 using Azure.Identity;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace cad_dispatch.Services
 {
-    /// <summary>
-    /// Writes structured audit events to Azure Table Storage.
-    /// Reads settings from IConfiguration (Azure App Configuration or local settings).
-    /// </summary>
     public class AuditLogService
     {
         private readonly TableClient _table;
         private const string DefaultTableName = "DispatchAudit";
 
-        public AuditLogService(IConfiguration config)
+        public AuditLogService(IConfiguration config, ILogger<AuditLogService>? logger = null)
         {
-            var tableName = config["Storage__TableName"] ?? DefaultTableName;
-            var connStr = config["Storage__ConnectionString"];
-            var accountUri = config["Storage__AccountUri"];
+            // Unify keys from both sources:
+            // - Azure App Configuration: Storage:AccountUri / Storage:ConnectionString / Storage:TableName
+            // - Env vars: Storage__AccountUri / Storage__ConnectionString / Storage__TableName
+            var storage = config.GetSection("Storage");
+
+            var tableName = storage["TableName"] ?? DefaultTableName;
+            var connStr = storage["ConnectionString"];
+            var accountUri = storage["AccountUri"];
+
+            logger?.LogInformation("[AuditLogService] TableName={Table}, ConnStr={HasConn}, AccountUri={HasUri}",
+                                   tableName,
+                                   string.IsNullOrWhiteSpace(connStr) ? "no" : "yes",
+                                   string.IsNullOrWhiteSpace(accountUri) ? "no" : "yes");
 
             if (!string.IsNullOrWhiteSpace(connStr))
             {
-                // Storage account (keys/SAS) connection string
                 _table = new TableClient(connStr, tableName);
             }
             else if (!string.IsNullOrWhiteSpace(accountUri))
             {
-                // Managed Identity / Azure AD path
-                var uri = new Uri(accountUri); // e.g. https://<account>.table.core.windows.net
-                var credential = new DefaultAzureCredential(
-                    new DefaultAzureCredentialOptions
-                    {
-                        // (Optional) helpful when debugging locally to use VisualStudio/CLI auth:
-                        // ExcludeInteractiveBrowserCredential = false,
-                    });
-                _table = new TableClient(uri, tableName, credential);
+                var uri = new Uri(accountUri); // e.g., https://<account>.table.core.windows.net
+                _table = new TableClient(uri, tableName, new DefaultAzureCredential());
             }
             else
             {
-                // NO dev fallback in cloud: throw with guidance
-                // If you still want local Azurite, put it in appsettings.Development.json only.
+                // Fail fast in cloud: missing config
                 throw new InvalidOperationException(
-                    "AuditLogService configuration missing. Set either Storage__ConnectionString " +
-                    "or Storage__AccountUri (preferred with Managed Identity).");
+                    "AuditLogService configuration missing. Supply Storage:ConnectionString or Storage:AccountUri.");
             }
 
-            // Create table if needed (async recommended)
+            // Create table if needed (retry for transient issues)
             CreateTableIfNotExistsAsync().GetAwaiter().GetResult();
         }
 
         private async Task CreateTableIfNotExistsAsync()
         {
-            // Simple retry for transient failures
             const int maxAttempts = 3;
-            int attempt = 0;
-            while (true)
+            for (var attempt = 1; attempt <= maxAttempts; attempt++)
             {
                 try
                 {
                     await _table.CreateIfNotExistsAsync();
                     return;
                 }
-                catch (RequestFailedException) when (++attempt < maxAttempts)
+                catch (RequestFailedException) when (attempt < maxAttempts)
                 {
                     await Task.Delay(TimeSpan.FromSeconds(2 * attempt));
                 }
@@ -81,8 +76,8 @@ namespace cad_dispatch.Services
             };
             entity["eventType"] = eventType;
             entity["timestampUtc"] = DateTime.UtcNow;
-
             enrich?.Invoke(entity);
+
             await _table.AddEntityAsync(entity);
         }
     }
