@@ -1,0 +1,92 @@
+
+#pragma once
+
+// ============================================================
+// How to use
+// ============================================================
+//
+//  Set Wi‑Fi:
+//  Put your SSID/password in IOT_CONFIG_WIFI_SSID / IOT_CONFIG_WIFI_PASSWORD.//
+//
+//  Choose auth:
+//
+//  SAS (default): Leave IOT_CONFIG_USE_X509_CERT commented; paste the device’s symmetric key into IOT_CONFIG_DEVICE_KEY.
+//  X.509: Uncomment #define IOT_CONFIG_USE_X509_CERT; paste the device cert and private key PEMs.//
+//
+//  Per-device build:
+//  Update IOT_CONFIG_DEVICE_ID per unit (e.g., AlertV1-Dev1 … AlertV1-Dev4).
+//
+//  Hub FQDN:
+//  If your hub name differs, change IOT_CONFIG_IOTHUB_FQDN to <your-hub>.azure-devices.net.//
+//
+//  Relay behavior (optional):
+//
+//  RELAY_PULSE_MS = 0 → set pin HIGH (latched).
+//  RELAY_PULSE_MS > 0 → momentary pulse then LOW.
+
+// ============================================================
+// Network (Wi‑Fi) configuration
+// ============================================================
+#define IOT_CONFIG_WIFI_SSID      "YOUR_WIFI_SSID"
+#define IOT_CONFIG_WIFI_PASSWORD  "YOUR_WIFI_PASSWORD"
+
+// Optional relay pulse configuration (milliseconds).
+// 0 => latching ON only; >0 => momentary pulse then LOW.
+#ifndef RELAY_PULSE_MS
+#define RELAY_PULSE_MS            0
+#endif
+
+// ============================================================
+// Azure IoT Hub (direct) endpoint and device identity
+// ============================================================
+// NOTE: These are used as string literals combined into spans.
+#define IOT_CONFIG_IOTHUB_FQDN    "IOT-Hub.azure-devices.net"
+#define IOT_CONFIG_DEVICE_ID      "AlertV1-Dev1"
+
+// ============================================================
+// Authentication mode
+// ============================================================
+// - Comment OUT to use SAS (symmetric key).
+// - Uncomment to use X.509 client certificate authentication.
+//
+// #define IOT_CONFIG_USE_X509_CERT
+
+// ---------------------------
+// SAS (symmetric key) mode:
+// ---------------------------
+// This is the *device-level symmetric key* (not a connection string).
+// Found under your device in IoT Hub: "Primary/Secondary key".
+#ifndef IOT_CONFIG_USE_X509_CERT
+  #define IOT_CONFIG_DEVICE_KEY   "PASTE_DEVICE_SYMMETRIC_KEY_HERE"
+
+  // SAS validity window (seconds). The sketch refreshes when <=120s remain.
+  // If not defined here, the .ino defaults to 3600.
+  #ifndef SAS_VALIDITY_SECS
+  #define SAS_VALIDITY_SECS       3600
+  #endif
+#endif
+
+// ---------------------------
+// X.509 certificate mode:
+// ---------------------------
+// Only needed when IOT_CONFIG_USE_X509_CERT is defined.
+// Provide PEM-encoded certificate and private key.
+// Ensure they match the device enrollment on your IoT Hub.
+#ifdef IOT_CONFIG_USE_X509_CERT
+  static const char IOT_CONFIG_DEVICE_CERT[] =
+    "-----BEGIN CERTIFICATE-----\n"
+    "PASTE_DEVICE_CERT_PEM_CONTENT_HERE\n"
+    "-----END CERTIFICATE-----\n";
+
+  static const char IOT_CONFIG_DEVICE_CERT_PRIVATE_KEY[] =
+    "-----BEGIN PRIVATE KEY-----\n"
+    "PASTE_DEVICE_PRIVATE_KEY_PEM_CONTENT_HERE\n"
+    "-----END PRIVATE KEY-----\n";
+#endif
+
+// ============================================================
+// Notes:
+// - TLS Root CA is provided by azure_ca.h (ca_pem/ca_pem_len).
+// - The sketch uses AZ_SPAN_FROM_STR, so keep these as plain C strings.
+// - For Arduino core v3+ or v2, the same names are consumed accordingly.
+// ============================================================

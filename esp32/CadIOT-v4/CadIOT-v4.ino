@@ -38,10 +38,12 @@ static AzIoTSasToken sasToken(
 
 static void connectWiFi() {
   Serial.printf("Connecting WiFi SSID: %s\n", IOT_CONFIG_WIFI_SSID);
+  Serial.println("");
   WiFi.mode(WIFI_STA);
   WiFi.begin(IOT_CONFIG_WIFI_SSID, IOT_CONFIG_WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) { delay(300); Serial.print("."); }
   Serial.printf("\nWiFi connected: %s\n", WiFi.localIP().toString().c_str());
+  Serial.println("");
 }
 
 static void initTime() {
@@ -76,6 +78,7 @@ static void initHubClient() {
   }
 
   Serial.printf("ClientId: %s\nUsername: %s\n", mqtt_client_id, mqtt_username);
+  Serial.println("");
 }
 
 static void activateRelay() {
@@ -110,9 +113,11 @@ static esp_err_t mqtt_event(esp_mqtt_event_handle_t e) {
       String payload; payload.reserve(e->data_len + 1);
       for (int i = 0; i < e->data_len; ++i) payload += (char)e->data[i];
 
+      Serial.println("");
       Serial.println("\nALERT");
       Serial.printf("Incoming topic: %s\n", topic.c_str());
       Serial.printf("Incoming payload: %s\n", payload.c_str());
+      Serial.println("");
 
       if (topic.startsWith("$iothub/methods/POST/")) 
       {
