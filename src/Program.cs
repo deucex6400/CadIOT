@@ -57,6 +57,17 @@ var host = new HostBuilder()
                        .ConfigureKeyVault(kv => kv.SetCredential(cred));
             });
         }
+
+        // After config.AddAzureAppConfiguration(...) and AddEnvironmentVariables(...)
+        var testBuilt = config.Build();
+        Console.WriteLine($"[CFG] Storage:TableName        = {testBuilt["Storage:TableName"]}");
+        Console.WriteLine($"[CFG] Storage:AccountUri       = {(testBuilt["Storage:AccountUri"])}");
+        Console.WriteLine($"[CFG] Storage:ConnectionString = {(testBuilt["Storage:ConnectionString"])}");
+        Console.WriteLine($"[CFG] IoTHub:HostName present  = {(testBuilt["IoTHub:HostName"])}");
+        Console.WriteLine($"[CFG] IoTHub:ConnectionString  = {(testBuilt["IoTHub:ConnectionString"])}");
+        Console.WriteLine($"[CFG] IoTHub__ConnectionString = {(testBuilt["IoTHub__ConnectionString"])}");
+
+
     })
     .ConfigureFunctionsWorkerDefaults()
     .ConfigureServices(services =>

@@ -1,27 +1,38 @@
+
 using System.Text;
 using System.Text.Json;
 using Azure.Identity;
 using Microsoft.Azure.Devices;
 using Microsoft.Azure.Devices.Common.Exceptions;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace cad_dispatch.Services
 {
     /// <summary>
     /// Sends commands to ESP32 devices via IoT Hub.
-    /// Chooses AAD/MSI when IoTHub__HostName is set; otherwise uses IoTHub__ConnectionString.
+    /// Prefers AAD/MSI when IoTHub:HostName is set; otherwise uses IoTHub:ConnectionString.
+    /// Works with either App Config (colon keys) or env vars (double-underscore).
     /// </summary>
     public class IoTHubService
     {
         private static ServiceClient? _cachedClient;
         private static readonly object _lock = new();
-        private readonly string? _hubHostname;
-        private readonly string? _hubConnStr;
 
-        public IoTHubService(IConfiguration config)
+        private readonly IConfiguration _config;
+        private readonly ILogger<IoTHubService>? _log;
+
+        public IoTHubService(IConfiguration config, ILogger<IoTHubService>? log = null)
         {
-            _hubHostname = config["IoTHub__HostName"];
-            _hubConnStr  = config["IoTHub__ConnectionString"];
+            _config = config;
+            _log = log;
+        }
+
+        // Unified reads: section -> colon -> double underscore
+        private string? Get(string key)
+        {
+            var section = _config.GetSection("IoTHub");
+            return section[key] ?? _config[$"IoTHub:{key}"] ?? _config[$"IoTHub__{key}"];
         }
 
         private async Task<ServiceClient> GetClientAsync()
@@ -33,35 +44,51 @@ namespace cad_dispatch.Services
             {
                 if (_cachedClient is null)
                 {
-                    if (!string.IsNullOrEmpty(_hubHostname))
+                    var hostName = Get("HostName");           // e.g., bgvfd-iot-hub.azure-devices.net
+                    var connStr = Get("ConnectionString");   // Hub connection string (service policy)
+
+                    _log?.LogInformation("IoTHub auth path: {path}", string.IsNullOrWhiteSpace(hostName) ? "connectionString" : "AAD/MSI");
+
+
+
+                    if (!string.IsNullOrWhiteSpace(hostName))
                     {
-                        _cachedClient = ServiceClient.Create(_hubHostname, new DefaultAzureCredential());
+                        // AAD/MSI path: requires IoT Hub RBAC (e.g., IoT Hub Data Contributor)
+                        // ServiceClient.Create(hostName, TokenCredential) is supported.
+                        _cachedClient = ServiceClient.Create(
+                            hostName,
+                            new DefaultAzureCredential()
+                        ); // Transport/Options can be provided if needed
+                    }
+                    else if (!string.IsNullOrWhiteSpace(connStr))
+                    {
+                        _cachedClient = ServiceClient.CreateFromConnectionString(connStr);
                     }
                     else
                     {
-                        _cachedClient = ServiceClient.CreateFromConnectionString(_HubConnStrOrThrow());
+                        throw new InvalidOperationException(
+                            "IoTHub configuration missing. Supply IoTHub:HostName (for MSI) or IoTHub:ConnectionString.");
                     }
                 }
             }
 
+
+            //var hostName = Get("HostName");
+            //var connStr = Get("ConnectionString");
+            //_log?.LogInformation("IoTHub auth path: {path}", string.IsNullOrWhiteSpace(hostName) ? "connectionString" : "AAD/MSI");
+
             await _cachedClient!.OpenAsync();
             return _cachedClient!;
-        }
-
-        private string _HubConnStrOrThrow()
-        {
-            if (string.IsNullOrEmpty(_hubConnStr))
-                throw new InvalidOperationException("IoTHub__ConnectionString is not configured.");
-            return _hubConnStr!;
         }
 
         public async Task<(string via, int status)> TriggerRelayAsync(string deviceId, object payload)
         {
             var client = await GetClientAsync();
 
+            // Try a direct method first
             var method = new CloudToDeviceMethod("activateRelay")
             {
-                ResponseTimeout   = TimeSpan.FromSeconds(6),
+                ResponseTimeout = TimeSpan.FromSeconds(6),
                 ConnectionTimeout = TimeSpan.FromSeconds(6)
             };
             method.SetPayloadJson(JsonSerializer.Serialize(payload));
@@ -69,23 +96,26 @@ namespace cad_dispatch.Services
             try
             {
                 var dmResult = await client.InvokeDeviceMethodAsync(deviceId, method);
+                _log?.LogInformation("Direct method status={Status}", dmResult.Status);
                 return ("directMethod", dmResult.Status);
             }
-            catch (DeviceNotFoundException) { }
-            catch (IotHubCommunicationException) { }
-            catch (UnauthorizedException) { }
-            catch { }
+            catch (DeviceNotFoundException) { _log?.LogWarning("Device not found: {DeviceId}", deviceId); }
+            catch (IotHubCommunicationException) { _log?.LogWarning("IoT Hub comm error for {DeviceId}", deviceId); }
+            catch (UnauthorizedException) { _log?.LogError("Unauthorized invoking method on {DeviceId}"); }
+            catch (Exception ex) { _log?.LogError(ex, "Method invoke failed for {DeviceId}", deviceId); }
 
+            // Fallback to C2D message
             var msgBody = JsonSerializer.Serialize(new { cmd = "activateRelay", payload });
             var message = new Message(Encoding.UTF8.GetBytes(msgBody))
             {
                 Ack = DeliveryAcknowledgement.Full,
                 ExpiryTimeUtc = DateTime.UtcNow.AddSeconds(60)
             };
-            message.Properties["source"]  = "CAD";
+            message.Properties["source"] = "CAD";
             message.Properties["command"] = "activateRelay";
 
             await client.SendAsync(deviceId, message);
+            _log?.LogInformation("Sent C2D to {DeviceId}", deviceId);
             return ("c2d", 202);
         }
     }
