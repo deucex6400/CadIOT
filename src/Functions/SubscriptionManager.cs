@@ -73,15 +73,7 @@ namespace cad_dispatch.Functions
             // Lifetime: richer notifications typically shorter
             var desiredLifetimeMinutes = useRich ? 1440 : 10080;
 
-            // Diagnostics: list current subscriptions
             var existingSubs = await graph.Subscriptions.GetAsync();
-            var count = existingSubs?.Value?.Count ?? 0;
-            _log.LogInformation("Graph returned {Count} subscriptions", count);
-            foreach (var s in existingSubs?.Value ?? Array.Empty<Subscription>())
-            {
-                _log.LogInformation("Sub {Id} resource={Resource} url={Url} exp={Exp}", s.Id, s.Resource, s.NotificationUrl, s.ExpirationDateTime);
-            }
-
             var match = existingSubs?.Value?.FirstOrDefault(s =>
                 string.Equals(Normalize(s.Resource), Normalize(resourceBasic), StringComparison.OrdinalIgnoreCase) &&
                 string.Equals(s.NotificationUrl, webhookUrl, StringComparison.OrdinalIgnoreCase));
@@ -108,12 +100,11 @@ namespace cad_dispatch.Functions
                     sub.Resource = $"/users/{mailbox}/mailFolders('inbox')/messages?$select=subject,from,receivedDateTime";
                 }
 
-                _log.LogInformation("Creating Graph subscription with Resource='{Resource}' and Webhook='{Webhook}'", sub.Resource, sub.NotificationUrl);
+                _log.LogInformation("Creating Graph subscription for resource={Resource} webhook={Webhook}", sub.Resource, sub.NotificationUrl);
                 match = await graph.Subscriptions.PostAsync(sub);
                 if (match is null)
                 {
                     _log.LogWarning("Created Graph subscription is null");
-                    await _audit.WriteAsync("subscription_create_null", e => { e["webhookUrl"] = webhookUrl; e["resource"] = sub.Resource; });
                     return;
                 }
                 _log.LogInformation("Created Graph subscription {Id} exp {Exp}",
@@ -125,13 +116,8 @@ namespace cad_dispatch.Functions
                     e["subscriptionId"] = match.Id;
                     e["expires"] = match.ExpirationDateTime;
                     e["webhookUrl"] = webhookUrl;
-                    e["resource"] = match.Resource;
                 });
                 return;
-            }
-            else
-            {
-                _log.LogInformation("Matched existing subscription {Id} resource={Resource} url={Url} exp={Exp}", match.Id, match.Resource, match.NotificationUrl, match.ExpirationDateTime);
             }
 
             // Renew when close to expiration
@@ -151,7 +137,7 @@ namespace cad_dispatch.Functions
                     update.Resource = $"/users/{mailbox}/mailFolders('inbox')/messages?$select=subject,from,receivedDateTime";
                 }
 
-                _log.LogInformation("Renewing Graph subscription {Id}. New exp={Exp}. Resource now='{Resource}'", match.Id, update.ExpirationDateTime, update.Resource);
+                _log.LogInformation("Renewing Graph subscription {Id} new exp {Exp}", match.Id, update.ExpirationDateTime);
                 await graph.Subscriptions[match.Id].PatchAsync(update);
 
                 await _audit.WriteAsync("subscription_renewed", e =>
@@ -159,7 +145,6 @@ namespace cad_dispatch.Functions
                     e["subscriptionId"] = match.Id;
                     e["expires"] = update.ExpirationDateTime;
                     e["webhookUrl"] = webhookUrl;
-                    e["resource"] = update.Resource ?? resourceBasic;
                 });
             }
             else
@@ -169,7 +154,6 @@ namespace cad_dispatch.Functions
                     e["subscriptionId"] = match.Id;
                     e["expires"] = match.ExpirationDateTime;
                     e["webhookUrl"] = webhookUrl;
-                    e["resource"] = match.Resource;
                 });
             }
         }
