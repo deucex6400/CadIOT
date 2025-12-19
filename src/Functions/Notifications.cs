@@ -1,5 +1,10 @@
-
+// Patched Notifications.cs — early-return validation to avoid 500 during Graph subscription creation
+// Joe Doucet / CadIOT
+using System;
 using System.IO;
+using System.Linq;
+using System.Collections.Generic;
+using System.Net;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Azure.Functions.Worker;
@@ -40,93 +45,134 @@ namespace cad_dispatch.Functions
         public async Task<HttpResponseData> Run(
             [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post")] HttpRequestData req)
         {
-            // Validation handshake (Graph webhook)
+            // 1) Validation handshake (Graph webhook): echo validationToken and return 200 ASAP
             var query = System.Web.HttpUtility.ParseQueryString(req.Url.Query);
-            var validationToken = query.Get("validationToken");
-            if (!string.IsNullOrEmpty(validationToken))
+            string? validationToken = query.Get("validationToken");
+
+            // Some clients send validation via POST with token in body; try lightweight fallback
+            if (string.IsNullOrWhiteSpace(validationToken) &&
+                string.Equals(req.Method, "POST", StringComparison.OrdinalIgnoreCase))
             {
-                var res = req.CreateResponse(System.Net.HttpStatusCode.OK);
-                res.Headers.Add("Content-Type", "text/plain");
-                await res.WriteStringAsync(validationToken);
-                _log.LogInformation("Validation completed.");
-                await _audit.WriteAsync("webhook_validation", e => { e["tokenLen"] = validationToken.Length; });
-                return res;
+                try
+                {
+                    using var reader = new StreamReader(req.Body);
+                    var body = await reader.ReadToEndAsync();
+                    using var doc = JsonDocument.Parse(body);
+                    if (doc.RootElement.TryGetProperty("validationToken", out var tokEl) && tokEl.ValueKind == JsonValueKind.String)
+                        validationToken = tokEl.GetString();
+                }
+                catch
+                {
+                    // swallow parse errors during validation fallback
+                }
             }
 
-            // Feature flag from App Config (colon) with env-var fallback
+            if (!string.IsNullOrWhiteSpace(validationToken))
+            {
+                var res = req.CreateResponse(HttpStatusCode.OK);
+                res.Headers.Add("Content-Type", "text/plain");
+                await res.WriteStringAsync(validationToken);
+
+                // Audit in background; never block or fail validation
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        _log.LogInformation("Graph validation received; token length={Len}", validationToken!.Length);
+                        await _audit.WriteAsync("webhook_validation", e =>
+                        {
+                            e["tokenLen"] = validationToken.Length;
+                            e["when"] = DateTime.UtcNow;
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(ex, "Audit logging failed during validation; ignoring.");
+                    }
+                });
+
+                return res; // IMPORTANT: return immediately to guarantee 200 OK to Graph
+            }
+
+            // 2) Normal notification processing
             var dispatchEnabledRaw = Get("Features:DispatchEnabled", "Features__DispatchEnabled");
             var dispatchEnabled = bool.TryParse(dispatchEnabledRaw, out var en) ? en : true;
 
-            var body = await new StreamReader(req.Body).ReadToEndAsync();
-            if (string.IsNullOrWhiteSpace(body))
+            string requestBody;
+            using (var sr = new StreamReader(req.Body))
+                requestBody = await sr.ReadToEndAsync();
+
+            if (string.IsNullOrWhiteSpace(requestBody))
             {
                 _log.LogWarning("Empty notification body.");
-                var bad = req.CreateResponse(System.Net.HttpStatusCode.BadRequest);
+                var bad = req.CreateResponse(HttpStatusCode.BadRequest);
                 await bad.WriteStringAsync("{\"error\":\"empty_body\"}");
-                await _audit.WriteAsync("webhook_empty", e => { });
+                try { await _audit.WriteAsync("webhook_empty", e => { }); } catch { /* ignore */ }
                 return bad;
             }
 
-            JsonDocument doc;
-            try { doc = JsonDocument.Parse(body); }
+            JsonDocument docRoot;
+            try { docRoot = JsonDocument.Parse(requestBody); }
             catch (Exception ex)
             {
                 _log.LogError(ex, "Failed to parse notification JSON.");
-                var bad = req.CreateResponse(System.Net.HttpStatusCode.BadRequest);
+                var bad = req.CreateResponse(HttpStatusCode.BadRequest);
                 await bad.WriteStringAsync("{\"error\":\"invalid_json\"}");
-                await _audit.WriteAsync("webhook_invalid_json", e => { e["error"] = ex.Message; });
+                try { await _audit.WriteAsync("webhook_invalid_json", e => { e["error"] = ex.Message; }); } catch { }
                 return bad;
             }
 
-            if (doc.RootElement.TryGetProperty("value", out var notifications) &&
+            if (docRoot.RootElement.TryGetProperty("value", out var notifications) &&
                 notifications.ValueKind == JsonValueKind.Array)
             {
                 var graph = _graphFactory.Client;
 
                 foreach (var n in notifications.EnumerateArray())
                 {
+                    // Lifecycle notifications
                     if (n.TryGetProperty("lifecycleEvent", out var lifeEl) && lifeEl.ValueKind == JsonValueKind.String)
                     {
-                        await _audit.WriteAsync("graph_lifecycle", e => { e["event"] = lifeEl.GetString(); });
+                        try { await _audit.WriteAsync("graph_lifecycle", e => { e["event"] = lifeEl.GetString(); }); } catch { }
                         continue;
                     }
 
                     string? userId = null;
                     string? messageId = null;
 
-                    // Rich notifications case
+                    // Rich notifications
                     if (n.TryGetProperty("resourceData", out var rd) && rd.ValueKind == JsonValueKind.Object)
                     {
                         messageId = rd.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
-                        userId = rd.TryGetProperty("userId", out var userEl) ? userEl.GetString() : null;
+                        userId    = rd.TryGetProperty("userId", out var userEl) ? userEl.GetString() : null;
                     }
 
-                    // Basic notifications case (parse 'resource')
+                    // Basic notifications: parse 'resource'
                     if ((userId == null || messageId == null) && n.TryGetProperty("resource", out var resEl))
                     {
                         var resource = resEl.GetString();
-                        if (string.IsNullOrEmpty(resource) || !resource.Contains("/messages/"))
+                        if (string.IsNullOrEmpty(resource) || !resource.Contains("/messages/", StringComparison.OrdinalIgnoreCase))
                         {
-                            await _audit.WriteAsync("skip_non_message", e => { e["resource"] = resource; });
+                            try { await _audit.WriteAsync("skip_non_message", e => { e["resource"] = resource; }); } catch { }
                             continue;
                         }
 
-                        var m = Regex.Match(resource, @"^/users/([^/]+)/messages/([^/?]+)", RegexOptions.IgnoreCase);
+                        // Matches /users/{userId}/messages/{messageId} and similar
+                        var m = Regex.Match(resource!, @"^/users/([^/]+)/messages/([^/?]+)", RegexOptions.IgnoreCase);
                         if (m.Success)
                         {
-                            userId ??= Uri.UnescapeDataString(m.Groups[1].Value);
+                            userId    ??= Uri.UnescapeDataString(m.Groups[1].Value);
                             messageId ??= Uri.UnescapeDataString(m.Groups[2].Value);
                         }
                         else
                         {
-                            await _audit.WriteAsync("parse_resource_failed", e => { e["resource"] = resource; });
+                            try { await _audit.WriteAsync("parse_resource_failed", e => { e["resource"] = resource; }); } catch { }
                             continue;
                         }
                     }
 
                     if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(messageId))
                     {
-                        await _audit.WriteAsync("missing_ids", e => { });
+                        try { await _audit.WriteAsync("missing_ids", e => { }); } catch { }
                         continue;
                     }
 
@@ -136,37 +182,37 @@ namespace cad_dispatch.Functions
                         {
                             r.QueryParameters.Select = new[] { "subject" };
                         });
-
-                        var subject = msg?.Subject ?? string.Empty;
+                        var subject  = msg?.Subject ?? string.Empty;
                         var deviceId = ResolveDeviceIdFromConfig(subject);
 
                         if (!dispatchEnabled)
                         {
                             _log.LogWarning("Dispatch disabled via feature flag.");
-                            await _audit.WriteAsync("dispatch_disabled", e => { e["subject"] = subject; });
+                            try { await _audit.WriteAsync("dispatch_disabled", e => { e["subject"] = subject; }); } catch { }
                             continue;
                         }
 
                         if (!string.IsNullOrEmpty(deviceId))
                         {
                             var result = await _iot.TriggerRelayAsync(deviceId, new { subject, reason = "CAD" });
-
-                            await _audit.WriteAsync("dispatch_triggered", e =>
+                            try
                             {
-                                e["userId"] = userId;
-                                e["messageId"] = messageId;
-                                e["subject"] = subject;
-                                e["deviceId"] = deviceId;
-                                e["via"] = result.via;
-                                e["status"] = result.status;
-                            });
+                                await _audit.WriteAsync("dispatch_triggered", e =>
+                                {
+                                    e["userId"]   = userId;
+                                    e["messageId"] = messageId;
+                                    e["subject"]  = subject;
+                                    e["deviceId"] = deviceId;
+                                    e["via"]      = result.via;
+                                    e["status"]   = result.status;
+                                });
+                            }
+                            catch { }
 
                             // Mark read and optionally move to "Processed"
                             await graph.Users[userId].Messages[messageId].PatchAsync(new Message { IsRead = true });
-
                             var folders = await graph.Users[userId].MailFolders.GetAsync();
-                            var processedFolder = folders?.Value?.FirstOrDefault(f =>
-                                f.DisplayName != null && f.DisplayName.Equals("Processed", StringComparison.OrdinalIgnoreCase));
+                            var processedFolder = folders?.Value?.FirstOrDefault(f => f.DisplayName != null && f.DisplayName.Equals("Processed", StringComparison.OrdinalIgnoreCase));
 
                             if (processedFolder != null)
                             {
@@ -175,36 +221,35 @@ namespace cad_dispatch.Functions
                                     {
                                         DestinationId = processedFolder.Id
                                     });
-
-                                await _audit.WriteAsync("message_moved", e =>
-                                {
-                                    e["messageId"] = messageId;
-                                    e["folderId"] = processedFolder.Id;
-                                });
+                                try { await _audit.WriteAsync("message_moved", e => { e["messageId"] = messageId; e["folderId"] = processedFolder.Id; }); } catch { }
                             }
                             else
                             {
-                                await _audit.WriteAsync("processed_folder_missing", e => { });
+                                try { await _audit.WriteAsync("processed_folder_missing", e => { }); } catch { }
                             }
                         }
                         else
                         {
-                            await _audit.WriteAsync("no_device_mapping", e => { e["subject"] = subject; });
+                            try { await _audit.WriteAsync("no_device_mapping", e => { e["subject"] = subject; }); } catch { }
                         }
                     }
                     catch (Exception ex)
                     {
-                        await _audit.WriteAsync("dispatch_error", e =>
+                        try
                         {
-                            e["userId"] = userId;
-                            e["messageId"] = messageId;
-                            e["error"] = ex.Message;
-                        });
+                            await _audit.WriteAsync("dispatch_error", e =>
+                            {
+                                e["userId"]    = userId;
+                                e["messageId"] = messageId;
+                                e["error"]     = ex.Message;
+                            });
+                        }
+                        catch { }
                     }
                 }
             }
 
-            var ok = req.CreateResponse(System.Net.HttpStatusCode.OK);
+            var ok = req.CreateResponse(HttpStatusCode.OK);
             ok.Headers.Add("Content-Type", "application/json");
             await ok.WriteStringAsync("{\"ok\":true}");
             return ok;
@@ -215,11 +260,9 @@ namespace cad_dispatch.Functions
             var routes = GetDispatchRoutes();
             foreach (var kvp in routes)
             {
-                if (!string.IsNullOrWhiteSpace(kvp.Key) &&
-                    subject.IndexOf(kvp.Key, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (!string.IsNullOrWhiteSpace(kvp.Key) && subject.IndexOf(kvp.Key, StringComparison.OrdinalIgnoreCase) >= 0)
                     return kvp.Value;
             }
-
             // Simple fallbacks
             if (subject.IndexOf("DISPATCH-1", StringComparison.OrdinalIgnoreCase) >= 0) return "Relay-1";
             if (subject.IndexOf("DISPATCH-2", StringComparison.OrdinalIgnoreCase) >= 0) return "Relay-2";
@@ -232,20 +275,17 @@ namespace cad_dispatch.Functions
             // Prefer App Config colon section
             var section = _config.GetSection("Dispatch:Routes");
             var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
             foreach (var child in section.GetChildren())
             {
                 var pattern = child.Key;
-                var device = child.Value ?? string.Empty;
+                var device  = child.Value ?? string.Empty;
                 if (!string.IsNullOrWhiteSpace(pattern) && !string.IsNullOrWhiteSpace(device))
                     dict[pattern] = device;
             }
 
-            // If nothing in App Config, optionally fall back to env vars (flat keys)
-            // Example env keys: Dispatch:Routes:DISPATCH-1 (stored in App Config) OR Dispatch__Routes__DISPATCH-1 (Function App app settings)
+            // Fallback to a few known env keys
             if (dict.Count == 0)
             {
-                // Try a few known route keys via direct reads as a minimal fallback
                 var r1 = Get("Dispatch:Routes:DISPATCH-1", "Dispatch__Routes__DISPATCH-1");
                 var r2 = Get("Dispatch:Routes:DISPATCH-2", "Dispatch__Routes__DISPATCH-2");
                 var r3 = Get("Dispatch:Routes:DISPATCH-3", "Dispatch__Routes__DISPATCH-3");
@@ -253,7 +293,6 @@ namespace cad_dispatch.Functions
                 if (!string.IsNullOrWhiteSpace(r2)) dict["DISPATCH-2"] = r2!;
                 if (!string.IsNullOrWhiteSpace(r3)) dict["DISPATCH-3"] = r3!;
             }
-
             return dict;
         }
     }

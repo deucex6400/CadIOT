@@ -9,6 +9,8 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Graph;
 using cad_dispatch.Services;
 using GraphClientFactory = cad_dispatch.Services.GraphClientFactory;
+using Google.Protobuf.WellKnownTypes;
+using System.Reflection;
 
 var host = new HostBuilder()
     .ConfigureAppConfiguration((ctx, config) =>
@@ -61,18 +63,21 @@ var host = new HostBuilder()
         // After config.AddAzureAppConfiguration(...) and AddEnvironmentVariables(...)
         var testBuilt = config.Build();
         Console.WriteLine($"[CFG] Storage:TableName        = {testBuilt["Storage:TableName"]}");
-        Console.WriteLine($"[CFG] Storage:AccountUri       = {(testBuilt["Storage:AccountUri"])}");
-        Console.WriteLine($"[CFG] Storage:ConnectionString = {(testBuilt["Storage:ConnectionString"])}");
-        Console.WriteLine($"[CFG] IoTHub:HostName present  = {(testBuilt["IoTHub:HostName"])}");
-        Console.WriteLine($"[CFG] IoTHub:ConnectionString  = {(testBuilt["IoTHub:ConnectionString"])}");
-        Console.WriteLine($"[CFG] IoTHub__ConnectionString = {(testBuilt["IoTHub__ConnectionString"])}");
+        Console.WriteLine($"[CFG] Storage:AccountUri       = {testBuilt["Storage:AccountUri"]}");
+        Console.WriteLine($"[CFG] Storage:ConnectionString = {testBuilt["Storage:ConnectionString"]}");
+        Console.WriteLine($"[CFG] IoTHub:HostName present  = {testBuilt["IoTHub:HostName"]}");
+        Console.WriteLine($"[CFG] IoTHub:ConnectionString  = {testBuilt["IoTHub:ConnectionString"]}");
+        Console.WriteLine($"[CFG] IoTHub__ConnectionString = {testBuilt["IoTHub__ConnectionString"]}");
 
-
+        if (string.IsNullOrWhiteSpace(built["Storage:AccountUri"]) && string.IsNullOrWhiteSpace(built["Storage:ConnectionString"]))
+        {
+            Console.Error.WriteLine("[CFG] ERROR: Storage settings missing. Set Storage: AccountUri or Storage: ConnectionString in Azure App Configuration.");
+        }
     })
-    .ConfigureFunctionsWorkerDefaults()
-    .ConfigureServices(services =>
-    {
-        services.AddSingleton<IoTHubService>();
+.ConfigureFunctionsWorkerDefaults()
+.ConfigureServices(services =>
+{
+    services.AddSingleton<IoTHubService>();
         services.AddSingleton<AuditLogService>();
         services.AddSingleton<GraphClientFactory>(_ =>
         {
