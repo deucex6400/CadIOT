@@ -4,7 +4,7 @@ name: Build and deploy .NET 8 Azure Function App - CadIOT (Zip Deploy)
 on:
   push:
     branches:
-      - main        # change to 'main' if your default branch is main
+      - main
   workflow_dispatch:
 
 env:
@@ -48,7 +48,6 @@ jobs:
           zip -r ../publish.zip .
           cd ..
 
-      # OIDC login using your federated identity secrets (no client secret stored in GitHub)
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -67,9 +66,7 @@ jobs:
               --name "${{ env.FUNCTION_APP }}" \
               --src ./publish.zip
 
-      # Optional: upload artifact for debugging
       - name: Upload publish.zip artifact (optional)
         uses: actions/upload-artifact@v4
         with:
           name: cadiot-functions-publish
-          path: ./publish.zip
