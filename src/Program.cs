@@ -66,7 +66,7 @@ var host = new HostBuilder()
         }
         else
         {
-            Console.WriteLine("NO AZURE APP CONFIGURATION SET!");
+            Console.WriteLine("NO AZURE APP CONFIGURATION SET!!");
         }
 
             // Build AFTER App Config provider is added
