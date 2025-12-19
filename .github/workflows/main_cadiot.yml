@@ -4,7 +4,7 @@ name: Build and deploy .NET 8 Azure Function App - CadIOT (Zip Deploy)
 on:
   push:
     branches:
-      - main        # change to 'main' if your default branch is main
+      - main
   workflow_dispatch:
 
 env:
@@ -12,6 +12,9 @@ env:
   DOTNET_VERSION: '8.0.x'
   FUNCTION_APP: 'CadIOT'          # Azure Function App name
   RESOURCE_GROUP: 'CadIOT'        # Azure resource group containing the Function App
+  AppConfig__ConnectionString: ${{ secrets.AppConfig__ConnectionString }}
+  Storage__ConnectionString: ${{ secrets.Storage__ConnectionString }}
+  IoTHub__ConnectionString: ${{ secrets.IoTHub__ConnectionString }}
 
 jobs:
   build-and-deploy:
@@ -48,13 +51,12 @@ jobs:
           zip -r ../publish.zip .
           cd ..
 
-      # OIDC login using your federated identity secrets (no client secret stored in GitHub)
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_8F297117C1F641C690B3D3AA75D11D93 }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_433B6AF34D9B492F910C083C2171314D }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_B6A50A4E800E40418139D6E2070FABED }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy via Zip Deploy
         uses: azure/CLI@v2
@@ -67,9 +69,11 @@ jobs:
               --name "${{ env.FUNCTION_APP }}" \
               --src ./publish.zip
 
-      # Optional: upload artifact for debugging
       - name: Upload publish.zip artifact (optional)
         uses: actions/upload-artifact@v4
         with:
           name: cadiot-functions-publish
-          path: ./publish.zip
+
+
+
+
