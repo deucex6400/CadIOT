@@ -22,12 +22,12 @@ namespace cad_dispatch
             var host = new HostBuilder()
                 .ConfigureAppConfiguration((ctx, config) =>
                 {
-                    // Base providers
+                    // Base providers: JSON + ENV
                     config.AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
                           .AddJsonFile($"appsettings.{ctx.HostingEnvironment.EnvironmentName}.json", optional: true, reloadOnChange: true)
                           .AddEnvironmentVariables();
 
-                    // Bootstrap to decide how to connect
+                    // Bootstrap
                     var bootstrap = config.Build();
                     var appConfigConn = bootstrap["AppConfig__ConnectionString"];
                     var appConfigEndpoint = bootstrap["AppConfig__Endpoint"];
@@ -70,9 +70,8 @@ namespace cad_dispatch
                         Console.WriteLine("[APP CONFIG] No AppConfig bootstrap setting found (AppConfig__ConnectionString or AppConfig__Endpoint). Provider NOT added.");
                     }
 
-                    // Build ONLY for diagnostics (do not assign back to ctx.Configuration)
+                    // Build only for diagnostics (do not assign back)
                     var effective = config.Build();
-
                     if (effective is IConfigurationRoot root)
                     {
                         Console.WriteLine("== Configuration Providers ==");
@@ -88,10 +87,10 @@ namespace cad_dispatch
                     Console.WriteLine($"[CFG] IoTHub:ConnectionString   = {(string.IsNullOrWhiteSpace(effective["IoTHub:ConnectionString"]) ? "(null)" : "(present)")}");
                     Console.WriteLine($"[APP CONFIG] Refresher captured: {(_appConfigRefresher != null ? "yes" : "no")}");
                 })
-                .ConfigureFunctionsWorkerDefaults() // keep worker defaults—adds env config + gRPC support
+                .ConfigureFunctionsWorkerDefaults() // keep worker defaults: env + gRPC
                 .ConfigureServices(services =>
                 {
-                    // Do NOT override IConfiguration here—let the worker inject the host config
+                    // Do not override IConfiguration
                     services.AddSingleton<cad_dispatch.Services.IoTHubService>();
                     services.AddSingleton<cad_dispatch.Services.AuditLogService>();
                     services.AddSingleton<cad_dispatch.Services.GraphClientFactory>(_ =>
