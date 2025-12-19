@@ -11,7 +11,11 @@ on:
 
 env:
   AZURE_FUNCTIONAPP_PACKAGE_PATH: 'src' # set this to the path to your web app project, defaults to the repository root
-  DOTNET_VERSION: '8.0.x' # set this to the dotnet version to use
+  DOTNET_VERSION: '8.0.x' # set this to the dotnet version to use  
+  AppConfig__ConnectionString: ${{ secrets.AppConfig__ConnectionString }}
+  Storage__ConnectionString: ${{ secrets.Storage__ConnectionString }}
+  IoTHub__ConnectionString: ${{ secrets.IoTHub__ConnectionString }}
+
 
 jobs:
   build-and-deploy:
@@ -52,3 +56,4 @@ jobs:
           package: '${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/output'
 
           
+
