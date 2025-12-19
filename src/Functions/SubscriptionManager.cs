@@ -1,4 +1,3 @@
-
 using System;
 using System.Linq;
 using Microsoft.Azure.Functions.Worker;
@@ -39,9 +38,11 @@ namespace cad_dispatch.Functions
             var useRichRaw = Get("Dispatch:UseRichNotifications", "Dispatch__UseRichNotifications");
             var encCertBase64 = Get("Dispatch:EncryptionCertBase64", "Dispatch__EncryptionCertBase64");
             var encCertId = Get("Dispatch:EncryptionCertId", "Dispatch__EncryptionCertId") ?? "bgvfd-cert";
-
             var useRich = bool.TryParse(useRichRaw, out var b) && b;
 
+            _log.LogInformation("SubscriptionManager starting. mailbox={Mailbox}, webhookUrl={Webhook}", mailbox, webhookUrl);
+
+            // Validate required inputs early
             if (string.IsNullOrWhiteSpace(mailbox) || string.IsNullOrWhiteSpace(webhookUrl))
             {
                 _log.LogWarning("SubscriptionManager missing mailbox or webhookUrl.");
@@ -49,9 +50,26 @@ namespace cad_dispatch.Functions
                 return;
             }
 
+            // Strong URL validation to avoid malformed values reaching Graph
+            if (!TryValidateHttpsUrl(webhookUrl, out var webhookUri))
+            {
+                _log.LogError("Invalid Dispatch:WebhookUrl value: '{Url}'", webhookUrl);
+                await _audit.WriteAsync("subscription_config_invalid", e => { e["webhookUrl"] = webhookUrl; });
+                return;
+            }
+
+            Uri? lifecycleUri = null;
+            if (!string.IsNullOrWhiteSpace(lifecycleUrl))
+            {
+                if (!TryValidateHttpsUrl(lifecycleUrl!, out lifecycleUri))
+                {
+                    _log.LogWarning("LifecycleWebhookUrl is invalid and will be ignored: '{Url}'", lifecycleUrl);
+                    lifecycleUrl = null; // ignore invalid lifecycle URL
+                }
+            }
+
             // Base resource (no select)
             var resourceBasic = $"/users/{mailbox}/mailFolders('inbox')/messages";
-
             // Lifetime: richer notifications typically shorter
             var desiredLifetimeMinutes = useRich ? 1440 : 10080;
 
@@ -70,7 +88,6 @@ namespace cad_dispatch.Functions
                     ClientState = "bgvfd-alerts",
                     ExpirationDateTime = DateTimeOffset.UtcNow.AddMinutes(desiredLifetimeMinutes)
                 };
-
                 if (!string.IsNullOrEmpty(lifecycleUrl))
                     sub.LifecycleNotificationUrl = lifecycleUrl;
 
@@ -83,14 +100,13 @@ namespace cad_dispatch.Functions
                     sub.Resource = $"/users/{mailbox}/mailFolders('inbox')/messages?$select=subject,from,receivedDateTime";
                 }
 
+                _log.LogInformation("Creating Graph subscription for resource={Resource} webhook={Webhook}", sub.Resource, sub.NotificationUrl);
                 match = await graph.Subscriptions.PostAsync(sub);
-
                 if (match is null)
                 {
                     _log.LogWarning("Created Graph subscription is null");
                     return;
                 }
-
                 _log.LogInformation("Created Graph subscription {Id} exp {Exp}",
                     match.Id ?? "(null)",
                     match.ExpirationDateTime?.ToString("O") ?? "(null)");
@@ -99,6 +115,7 @@ namespace cad_dispatch.Functions
                 {
                     e["subscriptionId"] = match.Id;
                     e["expires"] = match.ExpirationDateTime;
+                    e["webhookUrl"] = webhookUrl;
                 });
                 return;
             }
@@ -112,7 +129,6 @@ namespace cad_dispatch.Functions
                 {
                     ExpirationDateTime = DateTimeOffset.UtcNow.AddMinutes(desiredLifetimeMinutes)
                 };
-
                 if (useRich && !string.IsNullOrWhiteSpace(encCertBase64))
                 {
                     update.IncludeResourceData = true;
@@ -121,13 +137,14 @@ namespace cad_dispatch.Functions
                     update.Resource = $"/users/{mailbox}/mailFolders('inbox')/messages?$select=subject,from,receivedDateTime";
                 }
 
+                _log.LogInformation("Renewing Graph subscription {Id} new exp {Exp}", match.Id, update.ExpirationDateTime);
                 await graph.Subscriptions[match.Id].PatchAsync(update);
 
-                _log.LogInformation("Renewed Graph subscription {Id} new exp {Exp}", match.Id, update.ExpirationDateTime);
                 await _audit.WriteAsync("subscription_renewed", e =>
                 {
                     e["subscriptionId"] = match.Id;
                     e["expires"] = update.ExpirationDateTime;
+                    e["webhookUrl"] = webhookUrl;
                 });
             }
             else
@@ -136,8 +153,22 @@ namespace cad_dispatch.Functions
                 {
                     e["subscriptionId"] = match.Id;
                     e["expires"] = match.ExpirationDateTime;
+                    e["webhookUrl"] = webhookUrl;
                 });
             }
+        }
+
+        private static bool TryValidateHttpsUrl(string url, out Uri uri)
+        {
+            uri = default!;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed))
+                return false;
+            if (!string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (string.IsNullOrWhiteSpace(parsed.Host))
+                return false;
+            uri = parsed;
+            return true;
         }
 
         private static string Normalize(string? resource)

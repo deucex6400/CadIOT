@@ -32,11 +32,34 @@ namespace cad_dispatch
                     var appConfigConn = bootstrap["AppConfig:ConnectionString"];
                     var appConfigEndpoint = bootstrap["AppConfig:Endpoint"];
 
-                    // Azure SDK diagnostics
+                    // ---- Payload-aware Azure SDK diagnostics listener ----
                     _azureSdkListener = new AzureEventSourceListener(
-                        (e, _) => Console.WriteLine($"[AZURE SDK] {e.Level}: {e.Message}"),
-                        System.Diagnostics.Tracing.EventLevel.Informational);
+                        (evt, _) =>
+                        {
+                            var level = evt.Level;
+                            var message = evt.Message ?? string.Empty;
 
+                            // Try formatting the template message with payloads to avoid {0} {1} placeholders
+                            if (evt.Payload is not null && evt.Payload.Count > 0)
+                            {
+                                try
+                                {
+                                    message = string.Format(message, evt.Payload.ToArray());
+                                }
+                                catch
+                                {
+                                    // Fall back to raw template if formatting fails
+                                }
+                            }
+
+                            var sourceName = evt.EventSource?.Name ?? "AzureSDK";
+                            Console.WriteLine($"[AZURE SDK] {level}: [{sourceName}/{evt.EventName}] {message}");
+                        },
+                        // Change to EventLevel.Warning if you want fewer logs
+                        System.Diagnostics.Tracing.EventLevel.Informational
+                    );
+
+                    // ---- Azure App Configuration provider wiring ----
                     if (!string.IsNullOrWhiteSpace(appConfigConn))
                     {
                         Console.WriteLine("[APP CONFIG] Connecting via connection string.");
@@ -44,8 +67,9 @@ namespace cad_dispatch
                         {
                             o.Connect(appConfigConn)
                              .Select(KeyFilter.Any) // label-free
-                             .ConfigureRefresh(r => r.Register("Sentinels__AppConfigReload", refreshAll: true)
-                                                     .SetRefreshInterval(TimeSpan.FromSeconds(30)))
+                             .ConfigureRefresh(r => r
+                                 .Register("Sentinels__AppConfigReload", refreshAll: true)
+                                 .SetRefreshInterval(TimeSpan.FromSeconds(30)))
                              .UseFeatureFlags(ff => ff.SetRefreshInterval(TimeSpan.FromMinutes(5)));
                             _appConfigRefresher = o.GetRefresher();
                         });
@@ -58,8 +82,9 @@ namespace cad_dispatch
                         {
                             o.Connect(new Uri(appConfigEndpoint), cred)
                              .Select(KeyFilter.Any) // label-free
-                             .ConfigureRefresh(r => r.Register("Sentinels__AppConfigReload", refreshAll: true)
-                                                     .SetRefreshInterval(TimeSpan.FromSeconds(30)))
+                             .ConfigureRefresh(r => r
+                                 .Register("Sentinels__AppConfigReload", refreshAll: true)
+                                 .SetRefreshInterval(TimeSpan.FromSeconds(30)))
                              .UseFeatureFlags(ff => ff.SetRefreshInterval(TimeSpan.FromMinutes(5)))
                              .ConfigureKeyVault(kv => kv.SetCredential(cred));
                             _appConfigRefresher = o.GetRefresher();
@@ -80,11 +105,32 @@ namespace cad_dispatch
                         Console.WriteLine("=============================");
                     }
 
-                    Console.WriteLine($"[CFG] AppConfig:Endpoint        = {effective["AppConfig:Endpoint"]}");
-                    Console.WriteLine($"[CFG] Storage:TableName         = {effective["Storage:TableName"]}");
-                    Console.WriteLine($"[CFG] Storage:AccountUri        = {effective["Storage:AccountUri"]}");
-                    Console.WriteLine($"[CFG] Storage:ConnectionString  = {(string.IsNullOrWhiteSpace(effective["Storage:ConnectionString"]) ? "(null)" : "(present)")}");
-                    Console.WriteLine($"[CFG] IoTHub:ConnectionString   = {(string.IsNullOrWhiteSpace(effective["IoTHub:ConnectionString"]) ? "(null)" : "(present)")}");
+                    // Resolved key diagnostics
+                    Console.WriteLine($"[CFG] AppConfig:Endpoint = {effective["AppConfig:Endpoint"]}");
+                    Console.WriteLine($"[CFG] Storage:TableName = {effective["Storage:TableName"]}");
+                    Console.WriteLine($"[CFG] Storage:AccountUri = {effective["Storage:AccountUri"]}");
+                    Console.WriteLine($"[CFG] Storage:ConnectionString = {(string.IsNullOrWhiteSpace(effective["Storage:ConnectionString"]) ? "(null)" : "(present)")}");
+                    Console.WriteLine($"[CFG] IoTHub:ConnectionString = {(string.IsNullOrWhiteSpace(effective["IoTHub:ConnectionString"]) ? "(null)" : "(present)")}");
+
+                    // NEW: log resolved Dispatch keys to help diagnose webhook issues
+                    var dispatchWebhook = effective["Dispatch:WebhookUrl"] ?? effective["Dispatch__WebhookUrl"];
+                    var dispatchMailbox = effective["Dispatch:SharedMailbox"] ?? effective["Dispatch__SharedMailbox"];
+                    var lifecycleWebhook = effective["Dispatch:LifecycleWebhookUrl"] ?? effective["Dispatch__LifecycleWebhookUrl"];
+                    Console.WriteLine($"[CFG] Dispatch:SharedMailbox = {dispatchMailbox}");
+                    Console.WriteLine($"[CFG] Dispatch:WebhookUrl = {dispatchWebhook}");
+                    Console.WriteLine($"[CFG] Dispatch:LifecycleWebhookUrl = {lifecycleWebhook}");
+
+                    // Simple validation hints (console-only; SubscriptionManager does strong checks)
+                    if (!string.IsNullOrWhiteSpace(dispatchWebhook))
+                    {
+                        if (!Uri.TryCreate(dispatchWebhook, UriKind.Absolute, out var u) ||
+                            !string.Equals(u.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+                            string.IsNullOrWhiteSpace(u.Host))
+                        {
+                            Console.Error.WriteLine($"[CFG] WARNING: Dispatch:WebhookUrl appears invalid: '{dispatchWebhook}'. Expected absolute HTTPS URL with non-empty host.");
+                        }
+                    }
+
                     Console.WriteLine($"[APP CONFIG] Refresher captured: {(_appConfigRefresher != null ? "yes" : "no")}");
                 })
                 .ConfigureFunctionsWorkerDefaults() // keep worker defaults: env + gRPC (do not replace host config)
