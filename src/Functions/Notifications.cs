@@ -1,8 +1,4 @@
-
-// Notifications.cs — .NET 8 isolated-safe webhook handler for Microsoft Graph notifications
-// No Microsoft.AspNetCore.WebUtilities or System.Web dependencies
-// Joe Doucet / CadIOT
-
+// Notifications.cs — patched
 using cad_dispatch.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
@@ -37,17 +33,15 @@ namespace cad_dispatch.Functions
             _log = log;
         }
 
-        // Helper: prefer App Configuration colon keys, fall back to env var double-underscore
         private string? Get(string colonKey, string underscoreKey) => _config[colonKey] ?? _config[underscoreKey];
 
         [Function("Notifications")]
         public async Task<HttpResponseData> Run(
             [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post")] HttpRequestData req)
         {
-            // Top-level guard to prevent 500 responses to Graph
             try
             {
-                // -------- 0) Buffer request body ONCE and reuse as needed --------
+                // Buffer the request body once
                 string requestBody = string.Empty;
                 if (req.Body != null)
                 {
@@ -58,71 +52,35 @@ namespace cad_dispatch.Functions
                     requestBody = await sr.ReadToEndAsync();
                 }
 
-                // -------- 1) Validation handshake: echo validationToken and exit --------
-                var queryDict = ParseQuery(req.Url.Query);
-                string? validationToken = null;
-
-                if (queryDict.TryGetValue("validationToken", out var tokenValues) && tokenValues.Count > 0)
-                    validationToken = tokenValues[0];
-
-                // Fallback: token in body (POST)
-                if (string.IsNullOrWhiteSpace(validationToken) &&
-                    string.Equals(req.Method, "POST", StringComparison.OrdinalIgnoreCase) &&
-                    !string.IsNullOrWhiteSpace(requestBody))
-                {
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(requestBody);
-                        if (doc.RootElement.TryGetProperty("validationToken", out var tokEl) &&
-                            tokEl.ValueKind == JsonValueKind.String)
-                        {
-                            validationToken = tokEl.GetString();
-                        }
-                    }
-                    catch
-                    {
-                        // swallow parse errors during validation fallback
-                    }
-                }
-
-                if (!string.IsNullOrWhiteSpace(validationToken))
+                // Validation handshake — must echo validationToken as text/plain within ~10s
+                var query = ParseQuery(req.Url.Query);
+                if (query.TryGetValue("validationToken", out var vals) && vals.Count > 0)
                 {
                     var res = req.CreateResponse(HttpStatusCode.OK);
                     res.Headers.Add("Content-Type", "text/plain; charset=utf-8");
-                    await res.WriteStringAsync(validationToken);
-
-                    // Audit in background; never block validation return
+                    await res.WriteStringAsync(vals[0]);
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            _log.LogInformation("Graph validation received; token length={Len}", validationToken!.Length);
-                            await _audit.WriteAsync("webhook_validation", e =>
-                            {
-                                e["tokenLen"] = validationToken.Length;
-                                e["when"] = DateTime.UtcNow;
-                            });
+                            await _audit.WriteAsync("webhook_validation", e => { e["tokenLen"] = vals[0].Length; e["when"] = DateTime.UtcNow; });
                         }
-                        catch (Exception ex)
-                        {
-                            _log.LogWarning(ex, "Audit logging failed during validation; ignoring.");
-                        }
+                        catch { }
                     });
-
-                    return res; // IMPORTANT: return immediately to guarantee 200 OK to Graph
+                    return res; // return immediately
                 }
 
-                // -------- 2) DI null guards --------
+                // Guard DI
                 if (_graphFactory is null || _iot is null || _audit is null || _config is null)
                 {
-                    var res = req.CreateResponse(HttpStatusCode.OK); // avoid 500 in webhook
+                    var res = req.CreateResponse(HttpStatusCode.OK);
                     await res.WriteStringAsync("{\"error\":\"di_unavailable\"}");
                     _log.LogError("DI service(s) null: GraphFactory={GraphNull}, IoT={IoTNull}, Audit={AuditNull}, Config={CfgNull}",
                         _graphFactory is null, _iot is null, _audit is null, _config is null);
                     return res;
                 }
 
-                // -------- 3) Normal notification processing --------
+                // Feature flag
                 var dispatchEnabledRaw = Get("Features:DispatchEnabled", "Features__DispatchEnabled");
                 var dispatchEnabled = bool.TryParse(dispatchEnabledRaw, out var en) ? en : true;
 
@@ -132,15 +90,12 @@ namespace cad_dispatch.Functions
                     var bad = req.CreateResponse(HttpStatusCode.BadRequest);
                     bad.Headers.Add("Content-Type", "application/json");
                     await bad.WriteStringAsync("{\"error\":\"empty_body\"}");
-                    try { await _audit.WriteAsync("webhook_empty", e => { }); } catch { /* ignore */ }
+                    try { await _audit.WriteAsync("webhook_empty", e => { }); } catch { }
                     return bad;
                 }
 
-                JsonDocument docRoot;
-                try
-                {
-                    docRoot = JsonDocument.Parse(requestBody);
-                }
+                JsonDocument root;
+                try { root = JsonDocument.Parse(requestBody); }
                 catch (Exception ex)
                 {
                     _log.LogError(ex, "Failed to parse notification JSON.");
@@ -151,14 +106,14 @@ namespace cad_dispatch.Functions
                     return bad;
                 }
 
-                if (docRoot.RootElement.TryGetProperty("value", out var notifications) &&
-                    notifications.ValueKind == JsonValueKind.Array)
+                string sharedMailbox = Get("Dispatch:SharedMailbox", "Dispatch__SharedMailbox") ?? string.Empty;
+
+                if (root.RootElement.TryGetProperty("value", out var notifications) && notifications.ValueKind == JsonValueKind.Array)
                 {
                     var graph = _graphFactory.Client;
-
                     foreach (var n in notifications.EnumerateArray())
                     {
-                        // Lifecycle notifications (e.g., "subscriptionRemoved")
+                        // lifecycle notifications
                         if (n.TryGetProperty("lifecycleEvent", out var lifeEl) && lifeEl.ValueKind == JsonValueKind.String)
                         {
                             try { await _audit.WriteAsync("graph_lifecycle", e => { e["event"] = lifeEl.GetString(); }); } catch { }
@@ -168,36 +123,43 @@ namespace cad_dispatch.Functions
                         string? userId = null;
                         string? messageId = null;
 
-                        // Rich notifications: read resourceData
+                        // rich notifications
                         if (n.TryGetProperty("resourceData", out var rd) && rd.ValueKind == JsonValueKind.Object)
                         {
                             messageId = rd.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
                             userId = rd.TryGetProperty("userId", out var userEl) ? userEl.GetString() : null;
                         }
 
-                        // Basic notifications: parse 'resource' if needed
+                        // basic notifications — parse resource
                         if ((userId == null || messageId == null) && n.TryGetProperty("resource", out var resEl))
                         {
                             var resource = resEl.GetString();
-                            if (string.IsNullOrEmpty(resource) || !resource.Contains("/messages/", StringComparison.OrdinalIgnoreCase))
+                            if (!string.IsNullOrEmpty(resource) && resource.Contains("/messages/", StringComparison.OrdinalIgnoreCase))
+                            {
+                                // robust regex: /users/{userId}/.../messages/{messageId}
+                                var m = Regex.Match(resource!, @"^/?users/([^/]+)(?:/.*)?/messages/([^/?]+)", RegexOptions.IgnoreCase);
+                                if (m.Success)
+                                {
+                                    userId ??= Uri.UnescapeDataString(m.Groups[1].Value);
+                                    messageId ??= Uri.UnescapeDataString(m.Groups[2].Value);
+                                }
+                                else
+                                {
+                                    try { await _audit.WriteAsync("parse_resource_failed", e => { e["resource"] = resource; }); } catch { }
+                                    _log.LogWarning("Failed to parse resource: {Resource}", resource);
+                                    continue;
+                                }
+                            }
+                            else
                             {
                                 try { await _audit.WriteAsync("skip_non_message", e => { e["resource"] = resource; }); } catch { }
                                 continue;
                             }
-
-                            // Matches /users/{userId}/messages/{messageId}
-                            var m = Regex.Match(resource!, @"^/?users/([^/]+)/messages([^/?]+)", RegexOptions.IgnoreCase);
-                            if (m.Success)
-                            {
-                                userId ??= Uri.UnescapeDataString(m.Groups[1].Value);
-                                messageId ??= Uri.UnescapeDataString(m.Groups[2].Value);
-                            }
-                            else
-                            {
-                                try { await _audit.WriteAsync("parse_resource_failed", e => { e["resource"] = resource; }); } catch { }
-                                continue;
-                            }
                         }
+
+                        // fallback to configured mailbox
+                        if (string.IsNullOrEmpty(userId) && !string.IsNullOrWhiteSpace(sharedMailbox))
+                            userId = sharedMailbox;
 
                         if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(messageId))
                         {
@@ -211,7 +173,6 @@ namespace cad_dispatch.Functions
                             {
                                 r.QueryParameters.Select = new[] { "subject" };
                             });
-
                             var subject = msg?.Subject ?? string.Empty;
                             var deviceId = ResolveDeviceIdFromConfig(subject);
 
@@ -229,44 +190,37 @@ namespace cad_dispatch.Functions
                                 {
                                     await _audit.WriteAsync("dispatch_triggered", e =>
                                     {
-                                        e["userId"] = userId;
-                                        e["messageId"] = messageId;
-                                        e["subject"] = subject;
-                                        e["deviceId"] = deviceId;
-                                        e["via"] = result.via;
-                                        e["status"] = result.status;
+                                        e["userId"] = userId; e["messageId"] = messageId; e["subject"] = subject; e["deviceId"] = deviceId; e["via"] = result.via; e["status"] = result.status;
                                     });
                                 }
                                 catch { }
 
-                                // Mark read and optionally move to "Processed"
+                                // mark as read
                                 await graph.Users[userId].Messages[messageId].PatchAsync(new Message { IsRead = true });
 
+                                // move to Processed (create if missing)
                                 var folders = await graph.Users[userId].MailFolders.GetAsync();
-                                var processedFolder = folders?.Value?.FirstOrDefault(f =>
-                                    f.DisplayName != null && f.DisplayName.Equals("Processed", StringComparison.OrdinalIgnoreCase));
-
-                                if (processedFolder != null)
+                                var processedFolder = folders?.Value?.FirstOrDefault(f => f.DisplayName != null && f.DisplayName.Equals("Processed", StringComparison.OrdinalIgnoreCase));
+                                if (processedFolder == null)
                                 {
-                                    await graph.Users[userId].Messages[messageId].Move.PostAsync(
-                                        new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody
-                                        {
-                                            DestinationId = processedFolder.Id
-                                        });
-
                                     try
                                     {
-                                        await _audit.WriteAsync("message_moved", e =>
+                                        var inbox = folders?.Value?.FirstOrDefault(f => f.DisplayName != null && f.DisplayName.Equals("Inbox", StringComparison.OrdinalIgnoreCase));
+                                        if (inbox != null)
                                         {
-                                            e["messageId"] = messageId;
-                                            e["folderId"] = processedFolder.Id;
-                                        });
+                                            var created = await graph.Users[userId].MailFolders[inbox.Id].ChildFolders.PostAsync(new MailFolder { DisplayName = "Processed" });
+                                            processedFolder = created ?? processedFolder;
+                                        }
                                     }
-                                    catch { }
+                                    catch (Exception ex)
+                                    {
+                                        _log.LogWarning(ex, "Failed to create Processed folder.");
+                                    }
                                 }
-                                else
+                                if (processedFolder != null)
                                 {
-                                    try { await _audit.WriteAsync("processed_folder_missing", e => { }); } catch { }
+                                    await graph.Users[userId].Messages[messageId].Move.PostAsync(new Microsoft.Graph.Users.Item.Messages.Item.Move.MovePostRequestBody { DestinationId = processedFolder.Id });
+                                    try { await _audit.WriteAsync("message_moved", e => { e["messageId"] = messageId; e["folderId"] = processedFolder.Id; }); } catch { }
                                 }
                             }
                             else
@@ -276,17 +230,7 @@ namespace cad_dispatch.Functions
                         }
                         catch (Exception ex)
                         {
-                            // Per-notification error; keep loop going
-                            try
-                            {
-                                await _audit.WriteAsync("dispatch_error", e =>
-                                {
-                                    e["userId"] = userId;
-                                    e["messageId"] = messageId;
-                                    e["error"] = ex.Message;
-                                });
-                            }
-                            catch { }
+                            try { await _audit.WriteAsync("dispatch_error", e => { e["userId"] = userId; e["messageId"] = messageId; e["error"] = ex.Message; }); } catch { }
                         }
                     }
                 }
@@ -298,7 +242,6 @@ namespace cad_dispatch.Functions
             }
             catch (Exception ex)
             {
-                // Ensure webhook never returns 500; surface lightweight diagnostics
                 _log.LogError(ex, "Unhandled exception in Notifications.Run");
                 var res = req.CreateResponse(HttpStatusCode.OK);
                 res.Headers.Add("Content-Type", "application/json");
@@ -312,24 +255,19 @@ namespace cad_dispatch.Functions
             var routes = GetDispatchRoutes();
             foreach (var kvp in routes)
             {
-                if (!string.IsNullOrWhiteSpace(kvp.Key) &&
-                    subject.IndexOf(kvp.Key, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (!string.IsNullOrWhiteSpace(kvp.Key) && subject.IndexOf(kvp.Key, StringComparison.OrdinalIgnoreCase) >= 0)
                     return kvp.Value;
             }
-
-            // Simple fallbacks
-            if (subject.IndexOf("DISPATCH-1", StringComparison.OrdinalIgnoreCase) >= 0) return "Relay-1";
-            if (subject.IndexOf("DISPATCH-2", StringComparison.OrdinalIgnoreCase) >= 0) return "Relay-2";
-            if (subject.IndexOf("DISPATCH-3", StringComparison.OrdinalIgnoreCase) >= 0) return "Relay-3";
+            if (subject.IndexOf("DISPATCH-1", StringComparison.OrdinalIgnoreCase) >= 0) return "AlertV1-Dev1"; // default mapping
+            if (subject.IndexOf("DISPATCH-2", StringComparison.OrdinalIgnoreCase) >= 0) return "AlertV1-Dev2";
+            if (subject.IndexOf("DISPATCH-3", StringComparison.OrdinalIgnoreCase) >= 0) return "AlertV1-Dev3";
             return null;
         }
 
         private IReadOnlyDictionary<string, string> GetDispatchRoutes()
         {
-            // Prefer App Config colon section
             var section = _config.GetSection("Dispatch:Routes");
             var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
             foreach (var child in section.GetChildren())
             {
                 var pattern = child.Key;
@@ -337,8 +275,6 @@ namespace cad_dispatch.Functions
                 if (!string.IsNullOrWhiteSpace(pattern) && !string.IsNullOrWhiteSpace(device))
                     dict[pattern] = device;
             }
-
-            // Fallback to a few known env keys
             if (dict.Count == 0)
             {
                 var r1 = Get("Dispatch:Routes:DISPATCH-1", "Dispatch__Routes__DISPATCH-1");
@@ -348,48 +284,25 @@ namespace cad_dispatch.Functions
                 if (!string.IsNullOrWhiteSpace(r2)) dict["DISPATCH-2"] = r2!;
                 if (!string.IsNullOrWhiteSpace(r3)) dict["DISPATCH-3"] = r3!;
             }
-
             return dict;
         }
 
-        // ---- Minimal query string parser (isolated friendly, no external deps) ----
-        // Returns dictionary of key -> list of values (to mirror typical query parsing semantics)
         private static Dictionary<string, List<string>> ParseQuery(string queryString)
         {
             var result = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
-
-            if (string.IsNullOrEmpty(queryString))
-                return result;
-
-            // Strip leading '?'
+            if (string.IsNullOrEmpty(queryString)) return result;
             var q = queryString[0] == '?' ? queryString.Substring(1) : queryString;
-
             foreach (var pair in q.Split('&', StringSplitOptions.RemoveEmptyEntries))
             {
                 var idx = pair.IndexOf('=');
                 string rawKey, rawVal;
-                if (idx >= 0)
-                {
-                    rawKey = pair.Substring(0, idx);
-                    rawVal = pair.Substring(idx + 1);
-                }
-                else
-                {
-                    rawKey = pair;
-                    rawVal = string.Empty;
-                }
-
+                if (idx >= 0) { rawKey = pair.Substring(0, idx); rawVal = pair.Substring(idx + 1); }
+                else { rawKey = pair; rawVal = string.Empty; }
                 var key = Uri.UnescapeDataString(rawKey.Replace('+', ' '));
                 var val = Uri.UnescapeDataString(rawVal.Replace('+', ' '));
-
-                if (!result.TryGetValue(key, out var list))
-                {
-                    list = new List<string>();
-                    result[key] = list;
-                }
+                if (!result.TryGetValue(key, out var list)) { list = new List<string>(); result[key] = list; }
                 list.Add(val);
             }
-
             return result;
         }
     }
