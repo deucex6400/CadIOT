@@ -27,10 +27,10 @@ namespace cad_dispatch
                           .AddJsonFile($"appsettings.{ctx.HostingEnvironment.EnvironmentName}.json", optional: true, reloadOnChange: true)
                           .AddEnvironmentVariables();
 
-                    // Bootstrap
+                    // Bootstrap (read colon keys from IConfiguration)
                     var bootstrap = config.Build();
-                    var appConfigConn = bootstrap["AppConfig__ConnectionString"];
-                    var appConfigEndpoint = bootstrap["AppConfig__Endpoint"];
+                    var appConfigConn = bootstrap["AppConfig:ConnectionString"];
+                    var appConfigEndpoint = bootstrap["AppConfig:Endpoint"];
 
                     // Azure SDK diagnostics
                     _azureSdkListener = new AzureEventSourceListener(
@@ -67,7 +67,7 @@ namespace cad_dispatch
                     }
                     else
                     {
-                        Console.WriteLine("[APP CONFIG] No AppConfig bootstrap setting found (AppConfig__ConnectionString or AppConfig__Endpoint). Provider NOT added.");
+                        Console.WriteLine("[APP CONFIG] No AppConfig bootstrap setting found (AppConfig:ConnectionString or AppConfig:Endpoint). Provider NOT added.");
                     }
 
                     // Build only for diagnostics (do not assign back)
@@ -80,14 +80,14 @@ namespace cad_dispatch
                         Console.WriteLine("=============================");
                     }
 
-                    Console.WriteLine($"[CFG] AppConfig__Endpoint       = {effective["AppConfig__Endpoint"]}");
+                    Console.WriteLine($"[CFG] AppConfig:Endpoint        = {effective["AppConfig:Endpoint"]}");
                     Console.WriteLine($"[CFG] Storage:TableName         = {effective["Storage:TableName"]}");
                     Console.WriteLine($"[CFG] Storage:AccountUri        = {effective["Storage:AccountUri"]}");
                     Console.WriteLine($"[CFG] Storage:ConnectionString  = {(string.IsNullOrWhiteSpace(effective["Storage:ConnectionString"]) ? "(null)" : "(present)")}");
                     Console.WriteLine($"[CFG] IoTHub:ConnectionString   = {(string.IsNullOrWhiteSpace(effective["IoTHub:ConnectionString"]) ? "(null)" : "(present)")}");
                     Console.WriteLine($"[APP CONFIG] Refresher captured: {(_appConfigRefresher != null ? "yes" : "no")}");
                 })
-                .ConfigureFunctionsWorkerDefaults() // keep worker defaults: env + gRPC
+                .ConfigureFunctionsWorkerDefaults() // keep worker defaults: env + gRPC (do not replace host config)
                 .ConfigureServices(services =>
                 {
                     // Do not override IConfiguration
@@ -129,4 +129,3 @@ namespace cad_dispatch
             await host.RunAsync();
         }
     }
-}
