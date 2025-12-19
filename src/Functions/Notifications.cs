@@ -1,4 +1,4 @@
-// Notifications.cs — patched
+// Notifications.cs — patched v3 (supports segment- and function-style message resources)
 using cad_dispatch.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
@@ -61,11 +61,7 @@ namespace cad_dispatch.Functions
                     await res.WriteStringAsync(vals[0]);
                     _ = Task.Run(async () =>
                     {
-                        try
-                        {
-                            await _audit.WriteAsync("webhook_validation", e => { e["tokenLen"] = vals[0].Length; e["when"] = DateTime.UtcNow; });
-                        }
-                        catch { }
+                        try { await _audit.WriteAsync("webhook_validation", e => { e["tokenLen"] = vals[0].Length; e["when"] = DateTime.UtcNow; }); } catch { }
                     });
                     return res; // return immediately
                 }
@@ -134,25 +130,37 @@ namespace cad_dispatch.Functions
                         if ((userId == null || messageId == null) && n.TryGetProperty("resource", out var resEl))
                         {
                             var resource = resEl.GetString();
-                            if (!string.IsNullOrEmpty(resource) && resource.Contains("/messages/", StringComparison.OrdinalIgnoreCase))
+                            if (string.IsNullOrEmpty(resource) || resource.IndexOf("/messages", StringComparison.OrdinalIgnoreCase) < 0)
                             {
-                                // robust regex: /users/{userId}/.../messages/{messageId}
-                                var m = Regex.Match(resource!, @"^/?users/([^/]+)(?:/.*)?/messages/([^/?]+)", RegexOptions.IgnoreCase);
-                                if (m.Success)
-                                {
-                                    userId ??= Uri.UnescapeDataString(m.Groups[1].Value);
-                                    messageId ??= Uri.UnescapeDataString(m.Groups[2].Value);
-                                }
-                                else
-                                {
-                                    try { await _audit.WriteAsync("parse_resource_failed", e => { e["resource"] = resource; }); } catch { }
-                                    _log.LogWarning("Failed to parse resource: {Resource}", resource);
-                                    continue;
-                                }
+                                try { await _audit.WriteAsync("skip_non_message", e => { e["resource"] = resource; }); } catch { }
+                                _log.LogWarning("Skipping resource that does not include '/messages': {Resource}", resource);
+                                continue;
+                            }
+
+                            // Try segment-style first: /users/{userId}/.../messages/{messageId}
+                            var seg = Regex.Match(resource!, @"^/?users/([^/]+)(?:/.*)?/messages/([^/?]+)", RegexOptions.IgnoreCase);
+
+                            // Then function-style: Users('<userId>')/messages('<messageId>') or users('...')
+                            var fun = Regex.Match(resource!, @"^/?users\('([^']+)'\)/messages\('([^']+)'\)", RegexOptions.IgnoreCase);
+                            if (!fun.Success)
+                                fun = Regex.Match(resource!, @"^/?Users\('([^']+)'\)/messages\('([^']+)'\)", RegexOptions.IgnoreCase);
+
+                            if (seg.Success)
+                            {
+                                userId ??= Uri.UnescapeDataString(seg.Groups[1].Value);
+                                messageId ??= Uri.UnescapeDataString(seg.Groups[2].Value);
+                                try { await _audit.WriteAsync("resource_parsed", e => { e["style"] = "segment"; e["resource"] = resource; }); } catch { }
+                            }
+                            else if (fun.Success)
+                            {
+                                userId ??= Uri.UnescapeDataString(fun.Groups[1].Value);
+                                messageId ??= Uri.UnescapeDataString(fun.Groups[2].Value);
+                                try { await _audit.WriteAsync("resource_parsed", e => { e["style"] = "function"; e["resource"] = resource; }); } catch { }
                             }
                             else
                             {
-                                try { await _audit.WriteAsync("skip_non_message", e => { e["resource"] = resource; }); } catch { }
+                                try { await _audit.WriteAsync("parse_resource_failed", e => { e["resource"] = resource; }); } catch { }
+                                _log.LogWarning("Failed to parse message resource: {Resource}", resource);
                                 continue;
                             }
                         }
