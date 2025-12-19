@@ -168,7 +168,7 @@ namespace cad_dispatch.Functions
                         if (n.TryGetProperty("resourceData", out var rd) && rd.ValueKind == JsonValueKind.Object)
                         {
                             messageId = rd.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
-                            userId    = rd.TryGetProperty("userId", out var userEl) ? userEl.GetString() : null;
+                            userId = rd.TryGetProperty("userId", out var userEl) ? userEl.GetString() : null;
                             _log.LogInformation("resourceData ids: userId={UserId}, messageId={MessageId}", userId, messageId);
                         }
 
@@ -188,7 +188,7 @@ namespace cad_dispatch.Functions
                             var m = Regex.Match(resource!, @"^/users/([^/]+)/messages/([^/?]+)", RegexOptions.IgnoreCase);
                             if (m.Success)
                             {
-                                userId    ??= Uri.UnescapeDataString(m.Groups[1].Value);
+                                userId ??= Uri.UnescapeDataString(m.Groups[1].Value);
                                 messageId ??= Uri.UnescapeDataString(m.Groups[2].Value);
                             }
                             else
