@@ -12,10 +12,9 @@ env:
   DOTNET_VERSION: '8.0.x'
   FUNCTION_APP: 'CadIOT'          # Azure Function App name
   RESOURCE_GROUP: 'CadIOT'        # Azure resource group containing the Function App
-  
   AppConfig__ConnectionString: ${{ secrets.AppConfig__ConnectionString }}
   Storage__ConnectionString: ${{ secrets.Storage__ConnectionString }}
-  IoTHub__ConnectionString: ${{ secrets.IoTHub__ConnectionString )}
+  IoTHub__ConnectionString: ${{ secrets.IoTHub__ConnectionString }}
 
 jobs:
   build-and-deploy:
@@ -74,6 +73,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cadiot-functions-publish
+
 
 
 
