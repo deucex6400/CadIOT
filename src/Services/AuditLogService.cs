@@ -12,7 +12,7 @@ namespace cad_dispatch.Services
     public class AuditLogService
     {
         private readonly TableClient _table;
-        private const string DefaultTableName = "DispatchAudit";
+        //private const string DefaultTableName = "DispatchAudit";
 
         public AuditLogService(IConfiguration config, ILogger<AuditLogService>? logger = null)
         {
@@ -22,8 +22,8 @@ namespace cad_dispatch.Services
             var storage = config.GetSection("Storage");
             var tableName = storage["TableName"]
                          ?? config["Storage:TableName"]
-                         ?? config["Storage__TableName"]
-                         ?? DefaultTableName;
+                         ?? config["Storage__TableName"];
+                         //?? DefaultTableName;
             var connStr = storage["ConnectionString"]
                          ?? config["Storage:ConnectionString"]
                          ?? config["Storage__ConnectionString"];
