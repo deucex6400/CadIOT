@@ -1,12 +1,10 @@
 // Notifications.cs — .NET 8 isolated-safe webhook handler for Microsoft Graph notifications
-// Diagnostics-enhanced version
-// Joe Doucet / CadIOT
+// Consolidated (resource parsing + summary counters)
 using System;
 using System.IO;
 using System.Linq;
 using System.Collections.Generic;
 using System.Net;
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -27,12 +25,11 @@ namespace cad_dispatch.Functions
         private readonly AuditLogService _audit;
         private readonly ILogger<Notifications> _log;
 
-        public Notifications(
-            GraphClientFactory graphFactory,
-            IoTHubService iot,
-            IConfiguration config,
-            AuditLogService audit,
-            ILogger<Notifications> log)
+        public Notifications(GraphClientFactory graphFactory,
+                             IoTHubService iot,
+                             IConfiguration config,
+                             AuditLogService audit,
+                             ILogger<Notifications> log)
         {
             _graphFactory = graphFactory;
             _iot = iot;
@@ -144,6 +141,10 @@ namespace cad_dispatch.Functions
                     notifications.ValueKind == JsonValueKind.Array)
                 {
                     int total = notifications.GetArrayLength();
+                    int processedCount = 0;
+                    int skippedCount = 0;
+                    int errorCount = 0;
+
                     _log.LogInformation("Webhook received {Count} notification(s)", total);
                     try { await _audit.WriteAsync("webhook_received", e => { e["count"] = total; }); } catch { }
 
@@ -172,28 +173,43 @@ namespace cad_dispatch.Functions
                             _log.LogInformation("resourceData ids: userId={UserId}, messageId={MessageId}", userId, messageId);
                         }
 
-                        // Basic notifications
+                        // Basic notifications (or when userId missing)
                         if ((userId == null || messageId == null) && n.TryGetProperty("resource", out var resEl))
                         {
                             resource = resEl.GetString();
                             _log.LogInformation("Notification resource='{Resource}'", resource);
 
-                            if (string.IsNullOrEmpty(resource) || !resource.Contains("/messages/", StringComparison.OrdinalIgnoreCase))
+                            bool looksLikeMessage = !string.IsNullOrEmpty(resource) &&
+                                (resource.IndexOf("/messages/", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                 resource.IndexOf("/messages(", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                            if (!looksLikeMessage)
                             {
                                 _log.LogInformation("Skipping non-message notification; resource='{Resource}'", resource);
+                                skippedCount++;
                                 try { await _audit.WriteAsync("skip_non_message", e => { e["resource"] = resource; }); } catch { }
                                 continue;
                             }
 
-                            var m = Regex.Match(resource!, @"^/users/([^/]+)/messages/([^/?]+)", RegexOptions.IgnoreCase);
-                            if (m.Success)
+                            // Try slash-form: /users/{userId}/messages/{messageId}
+                            var mSlash = Regex.Match(resource!, @"^/users/([^/]+)/messages/([^/?]+)", RegexOptions.IgnoreCase);
+                            // Try key-form: /users('{userId}')/messages('{messageId}') with optional quotes and any casing
+                            var mKey = Regex.Match(resource!, @"^/users\(['\"]? ([^/ '\)]+)['\"]?\)/messages\(['\"]?([^/'\)]+)['\"]?\)", RegexOptions.IgnoreCase);
+
+                            if (mSlash.Success)
                             {
-                                userId ??= Uri.UnescapeDataString(m.Groups[1].Value);
-                                messageId ??= Uri.UnescapeDataString(m.Groups[2].Value);
+                                userId ??= Uri.UnescapeDataString(mSlash.Groups[1].Value);
+                                messageId ??= Uri.UnescapeDataString(mSlash.Groups[2].Value);
+                            }
+                            else if (mKey.Success)
+                            {
+                                userId ??= Uri.UnescapeDataString(mKey.Groups[1].Value);
+                                messageId ??= Uri.UnescapeDataString(mKey.Groups[2].Value);
                             }
                             else
                             {
                                 _log.LogWarning("Failed to parse resource='{Resource}'", resource);
+                                skippedCount++;
                                 try { await _audit.WriteAsync("parse_resource_failed", e => { e["resource"] = resource; }); } catch { }
                                 continue;
                             }
@@ -202,6 +218,7 @@ namespace cad_dispatch.Functions
                         if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(messageId))
                         {
                             _log.LogWarning("Missing ids; userId='{UserId}', messageId='{MessageId}'", userId, messageId);
+                            skippedCount++;
                             try { await _audit.WriteAsync("missing_ids", e => { }); } catch { }
                             continue;
                         }
@@ -227,6 +244,7 @@ namespace cad_dispatch.Functions
                             if (!string.IsNullOrEmpty(deviceId))
                             {
                                 var result = await _iot.TriggerRelayAsync(deviceId, new { subject, reason = "CAD" });
+                                processedCount++;
                                 _log.LogInformation("Dispatch triggered to deviceId={DeviceId} via={Via} status={Status}", deviceId, result.via, result.status);
                                 try
                                 {
@@ -270,10 +288,14 @@ namespace cad_dispatch.Functions
                         }
                         catch (Exception ex)
                         {
+                            errorCount++;
                             _log.LogError(ex, "Error processing messageId={MessageId} userId={UserId}", messageId, userId);
                             try { await _audit.WriteAsync("dispatch_error", e => { e["userId"] = userId; e["messageId"] = messageId; e["error"] = ex.Message; }); } catch { }
                         }
                     }
+
+                    _log.LogInformation("Summary: processed={Processed} skipped={Skipped} errors={Errors}", processedCount, skippedCount, errorCount);
+                    try { await _audit.WriteAsync("webhook_summary", e => { e["processed"] = processedCount; e["skipped"] = skippedCount; e["errors"] = errorCount; e["total"] = total; }); } catch { }
                 }
 
                 var ok = req.CreateResponse(HttpStatusCode.OK);
