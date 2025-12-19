@@ -20,10 +20,16 @@ namespace cad_dispatch.Services
             // - Azure App Configuration: Storage:AccountUri / Storage:ConnectionString / Storage:TableName
             // - Env vars: Storage__AccountUri / Storage__ConnectionString / Storage__TableName
             var storage = config.GetSection("Storage");
-
-            var tableName = storage["TableName"] ?? DefaultTableName;
-            var connStr = storage["ConnectionString"];
-            var accountUri = storage["AccountUri"];
+            var tableName = storage["TableName"]
+                         ?? config["Storage:TableName"]
+                         ?? config["Storage__TableName"]
+                         ?? DefaultTableName;
+            var connStr = storage["ConnectionString"]
+                         ?? config["Storage:ConnectionString"]
+                         ?? config["Storage__ConnectionString"];
+            var accountUri = storage["AccountUri"]
+                         ?? config["Storage:AccountUri"]
+                         ?? config["Storage__AccountUri"];
 
             logger?.LogInformation("[AuditLogService] TableName={Table}, ConnStr={HasConn}, AccountUri={HasUri}",
                                    tableName,
