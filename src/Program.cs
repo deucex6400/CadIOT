@@ -26,6 +26,7 @@ var host = new HostBuilder()
         if (!string.IsNullOrWhiteSpace(appConfigConn))
         {
             // Connect via connection string (label-free)
+            Console.WriteLine("CONNECTING VIA CONNECTION STRING!");
             config.AddAzureAppConfiguration(options =>
             {
                 options.Connect(appConfigConn)
@@ -45,6 +46,7 @@ var host = new HostBuilder()
         }
         else if (!string.IsNullOrWhiteSpace(appConfigEndpoint))
         {
+            Console.WriteLine("CONNECTING VIA ENDPOINT AND MANAGED IDENTITY!");
             var cred = new DefaultAzureCredential();
             // Connect via endpoint + MI (label-free)
             config.AddAzureAppConfiguration(options =>
@@ -62,9 +64,13 @@ var host = new HostBuilder()
                        .ConfigureKeyVault(kv => kv.SetCredential(cred));
             });
         }
+        else
+        {
+            Console.WriteLine("NO AZURE APP CONFIGURATION SET!");
+        }
 
-        // Build AFTER App Config provider is added
-        var effective = config.Build();
+            // Build AFTER App Config provider is added
+            var effective = config.Build();
         Console.WriteLine($"[CFG] Storage:TableName        = {effective["Storage:TableName"]}");
         Console.WriteLine($"[CFG] Storage:AccountUri       = {effective["Storage:AccountUri"]}");
         Console.WriteLine($"[CFG] Storage:ConnectionString = {effective["Storage:ConnectionString"]}");
