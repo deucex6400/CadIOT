@@ -3,21 +3,15 @@
 // No Microsoft.AspNetCore.WebUtilities or System.Web dependencies
 // Joe Doucet / CadIOT
 
-using System;
-using System.IO;
-using System.Linq;
-using System.Collections.Generic;
-using System.Net;
-using System.Text;
-using System.Text.Json;
-using System.Text.RegularExpressions;
-using System.Threading.Tasks;
+using cad_dispatch.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
-using cad_dispatch.Services;
+using Microsoft.Extensions.Logging;
 using Microsoft.Graph.Models;
+using System.Net;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace cad_dispatch.Functions
 {

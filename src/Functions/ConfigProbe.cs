@@ -1,10 +1,9 @@
 // ConfigProbe.cs - HTTP probe with raw environment inspection
-using System;
-using System.Text.Json;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace cad_dispatch.Functions
 {

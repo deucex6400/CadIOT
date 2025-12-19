@@ -1,10 +1,10 @@
 
-using System.Text.Json;
+using cad_dispatch.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
-using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
-using cad_dispatch.Services;
+using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace cad_dispatch.Functions
 {

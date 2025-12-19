@@ -1,10 +1,8 @@
-using System;
-using System.Linq;
+using cad_dispatch.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Graph.Models;
-using cad_dispatch.Services;
 
 namespace cad_dispatch.Functions
 {

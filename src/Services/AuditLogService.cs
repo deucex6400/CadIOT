@@ -1,6 +1,3 @@
-
-using System;
-using System.Threading.Tasks;
 using Azure;
 using Azure.Data.Tables;
 using Azure.Identity;
@@ -23,7 +20,7 @@ namespace cad_dispatch.Services
             var tableName = storage["TableName"]
                          ?? config["Storage:TableName"]
                          ?? config["Storage__TableName"];
-                         //?? DefaultTableName;
+            //?? DefaultTableName;
             var connStr = storage["ConnectionString"]
                          ?? config["Storage:ConnectionString"]
                          ?? config["Storage__ConnectionString"];

@@ -1,10 +1,10 @@
-using System.Text;
-using System.Text.Json;
 using Azure.Identity;
 using Microsoft.Azure.Devices;
 using Microsoft.Azure.Devices.Common.Exceptions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using System.Text;
+using System.Text.Json;
 
 namespace cad_dispatch.Services
 {
@@ -38,7 +38,7 @@ namespace cad_dispatch.Services
             if (_cachedClient is not null) return _cachedClient;
 
             var hostName = Get("HostName");       // e.g., <hub>.azure-devices.net
-            var connStr  = Get("ConnectionString"); // Hub service connection string
+            var connStr = Get("ConnectionString"); // Hub service connection string
 
             // Prefer SAS when available to simplify local development
             if (!string.IsNullOrWhiteSpace(connStr))
