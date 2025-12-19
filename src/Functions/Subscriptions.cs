@@ -23,19 +23,20 @@ namespace cad_dispatch.Functions
             _log = log;
         }
 
+
         [Function("Subscriptions")]
         public async Task<HttpResponseData> Run(
             [HttpTrigger(AuthorizationLevel.Function, "get", Route = "Subscriptions")] HttpRequestData req)
         {
-            var res = req.CreateResponse(HttpStatusCode.OK);
-            res.Headers.Add("Content-Type", "application/json");
-
             try
             {
+                var res = req.CreateResponse(HttpStatusCode.OK);
+                res.Headers.Add("Content-Type", "application/json");
+
                 var graph = _graphFactory.Client;
                 var collection = await graph.Subscriptions.GetAsync();
-                var subs = collection?.Value ?? new List<Microsoft.Graph.Models.Subscription>();
 
+                var subs = collection?.Value ?? new List<Microsoft.Graph.Models.Subscription>();
                 var payload = subs.Select(s => new
                 {
                     id = s.Id,
@@ -49,21 +50,22 @@ namespace cad_dispatch.Functions
                     clientState = s.ClientState
                 });
 
-                await res.WriteStringAsync(JsonSerializer.Serialize(new
-                {
-                    count = subs.Count,
-                    items = payload
-                }));
+                await res.WriteStringAsync(JsonSerializer.Serialize(new { count = subs.Count, items = payload }));
+                return res;
             }
             catch (Exception ex)
             {
-                _log.LogError(ex, "Failed to list Graph subscriptions.");
-                res = req.CreateResponse(HttpStatusCode.InternalServerError);
+                var res = req.CreateResponse(HttpStatusCode.InternalServerError);
                 res.Headers.Add("Content-Type", "application/json");
-                await res.WriteStringAsync(JsonSerializer.Serialize(new { error = ex.Message }));
+                await res.WriteStringAsync(JsonSerializer.Serialize(new
+                {
+                    error = ex.GetType().FullName,
+                    message = ex.Message,
+                    stack = ex.StackTrace
+                }));
+                return res;
             }
 
-            return res;
         }
     }
 }
