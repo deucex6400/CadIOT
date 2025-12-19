@@ -194,7 +194,12 @@ namespace cad_dispatch.Functions
                             // Try slash-form: /users/{userId}/messages/{messageId}
                             var mSlash = Regex.Match(resource!, @"^/users/([^/]+)/messages/([^/?]+)", RegexOptions.IgnoreCase);
                             // Try key-form: /users('{userId}')/messages('{messageId}') with optional quotes and any casing
-                            var mKey = Regex.Match(resource!, @"^/users\(['\"]? ([^/ '\)]+)['\"]?\)/messages\(['\"]?([^/'\)]+)['\"]?\)", RegexOptions.IgnoreCase);
+                            //var mKey = Regex.Match(resource!, @"^/users\(['\"]? ([^/ '\)]+)['\"]?\)/messages\(['\"]?([^/'\)]+)['\"]?\)", RegexOptions.IgnoreCase);
+                            var mKey = Regex.Match(
+                                resource!,
+                                @"^/users\(['""]?([^/'\)]+)['""]?\)/messages\(['""]?([^/'\)]+)['""]?\)",
+                                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant
+                            );
 
                             if (mSlash.Success)
                             {
