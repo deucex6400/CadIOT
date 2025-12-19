@@ -1,59 +1,75 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/azure/functions-action
-# More GitHub Actions for Azure: https://github.com/Azure/actions
 
-name: Build and deploy dotnet core project to Azure Function App - CadIOT
+name: Build and deploy .NET 8 Azure Function App - CadIOT (Zip Deploy)
 
 on:
   push:
     branches:
-      - master
+      - main        # change to 'main' if your default branch is main
   workflow_dispatch:
 
 env:
-  AZURE_FUNCTIONAPP_PACKAGE_PATH: 'src' # set this to the path to your web app project, defaults to the repository root
-  DOTNET_VERSION: '8.0.x' # set this to the dotnet version to use  
-  AppConfig__ConnectionString: ${{ secrets.AppConfig__ConnectionString }}
-  Storage__ConnectionString: ${{ secrets.Storage__ConnectionString }}
-  IoTHub__ConnectionString: ${{ secrets.IoTHub__ConnectionString }}
-
+  PROJECT_PATH: 'src'             # path to your Functions project (.csproj)
+  DOTNET_VERSION: '8.0.x'
+  FUNCTION_APP: 'CadIOT'          # Azure Function App name
+  RESOURCE_GROUP: 'CadIOT'        # Azure resource group containing the Function App
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write #This is required for requesting the JWT
-      contents: read #This is required for actions/checkout
+      id-token: write             # required for OIDC login
+      contents: read
 
     steps:
-      - name: 'Checkout GitHub Action'
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup DotNet ${{ env.DOTNET_VERSION }} Environment
-        uses: actions/setup-dotnet@v1
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: 'Resolve Project Dependencies Using Dotnet'
-        shell: bash
+      - name: Restore
+        run: dotnet restore ${{ env.PROJECT_PATH }}
+
+      - name: Publish (Release)
+        run: dotnet publish ${{ env.PROJECT_PATH }} --configuration Release -o ./publish
+
+      - name: Validate publish output
         run: |
-          pushd './${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
-          dotnet build --configuration Release --output ./output
-          popd
-      
-      - name: Login to Azure
+          if [ ! -d "./publish" ] || [ -z "$(ls -A ./publish)" ]; then
+            echo "Publish output is empty. Failing the job."
+            exit 1
+          fi
+
+      - name: Archive package
+        run: |
+          cd publish
+          zip -r ../publish.zip .
+          cd ..
+
+      # OIDC login using your federated identity secrets (no client secret stored in GitHub)
+      - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_8F297117C1F641C690B3D3AA75D11D93 }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_433B6AF34D9B492F910C083C2171314D }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_B6A50A4E800E40418139D6E2070FABED }}
 
-      - name: 'Run Azure Functions Action'
-        uses: Azure/functions-action@v1
-        id: fa
+      - name: Deploy via Zip Deploy
+        uses: azure/CLI@v2
         with:
-          app-name: 'CadIOT'
-          slot-name: 'Production'
-          package: '${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/output'
+          inlineScript: |
+            az account show
+            echo "Deploying publish.zip to Function App '${{ env.FUNCTION_APP }}' in RG '${{ env.RESOURCE_GROUP }}'..."
+            az functionapp deployment source config-zip \
+              --resource-group "${{ env.RESOURCE_GROUP }}" \
+              --name "${{ env.FUNCTION_APP }}" \
+              --src ./publish.zip
 
-          
-
+      # Optional: upload artifact for debugging
+      - name: Upload publish.zip artifact (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cadiot-functions-publish
+          path: ./publish.zip
